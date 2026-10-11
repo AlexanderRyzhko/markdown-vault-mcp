@@ -2402,3 +2402,21 @@ class TestSourceDirMissing:
             git_repo_url="https://example.invalid/vault.git",
         )
         assert source_dir_problem(config) is None
+
+
+class TestEmbeddingStore:
+    def test_defaults_to_numpy(self, tmp_path: Path) -> None:
+        config = ProjectConfig(source_dir=tmp_path)
+        assert config.embedding_store == "numpy"
+        assert config.indexing.embedding_store == "numpy"
+
+    def test_read_from_the_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MARKDOWN_VAULT_MCP_SOURCE_DIR", str(tmp_path))
+        monkeypatch.setenv("MARKDOWN_VAULT_MCP_EMBEDDING_STORE", "numpy")
+        assert ProjectConfig.from_env().embedding_store == "numpy"
+
+    def test_an_unknown_store_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigurationError, match="EMBEDDING_STORE"):
+            ProjectConfig(source_dir=tmp_path, embedding_store="milvus")

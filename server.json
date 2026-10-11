@@ -149,6 +149,11 @@
           "format": "filepath"
         },
         {
+          "name": "MARKDOWN_VAULT_MCP_EMBEDDING_STORE",
+          "description": "Where embeddings are stored. 'numpy' keeps them in files beside the index (or in memory without INDEX_PATH).",
+          "default": "numpy"
+        },
+        {
           "name": "MARKDOWN_VAULT_MCP_INDEXED_FIELDS",
           "description": "Comma-separated frontmatter fields promoted to the tag index for structured filtering. Changing it cold-rebuilds the index once on next startup; SEARCHABLE_FIELDS inherits this value when unset."
         },
@@ -751,6 +756,11 @@
           "name": "MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH",
           "description": "Base path for the embeddings files. Defaults beside INDEX_PATH (index-db-embeddings.npy and .json beside index.db); without INDEX_PATH the vectors are kept in memory and rebuilt at each start. Setting it also lets the provider be auto-detected.",
           "format": "filepath"
+        },
+        {
+          "name": "MARKDOWN_VAULT_MCP_EMBEDDING_STORE",
+          "description": "Where embeddings are stored. 'numpy' keeps them in files beside the index (or in memory without INDEX_PATH).",
+          "default": "numpy"
         },
         {
           "name": "MARKDOWN_VAULT_MCP_INDEXED_FIELDS",

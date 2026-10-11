@@ -218,6 +218,17 @@ class ProjectConfig:
             "wizard": {"group": "Indexing"},
         },
     )
+    embedding_store: str = field(
+        default="numpy",
+        metadata={
+            "help": (
+                "Where embeddings are stored. 'numpy' keeps them in files "
+                "beside the index (or in memory without INDEX_PATH)."
+            ),
+            "tags": ("indexing",),
+            "wizard": {"group": "Indexing"},
+        },
+    )
     indexed_fields: Sequence[str] | None = field(
         default=None,
         metadata={
@@ -1001,6 +1012,7 @@ class ProjectConfig:
             index_path=self.index_path,
             state_path=self.state_path,
             embeddings_path=self.embeddings_path,
+            embedding_store=self.embedding_store,
             indexed_frontmatter_fields=self.indexed_fields,
             required_frontmatter=self.required_fields,
             exclude_patterns=self.exclude,
@@ -1156,6 +1168,12 @@ class ProjectConfig:
         # (not section-view properties); each validates its own bounds in its
         # ``__post_init__`` at construction time (default_factory and from_env
         # alike), so neither needs re-construction here.
+        embedding_stores = ("numpy",)  # #1497 adds "sqlite"
+        if self.embedding_store not in embedding_stores:
+            raise ConfigurationError(
+                f"MARKDOWN_VAULT_MCP_EMBEDDING_STORE must be one of "
+                f"{', '.join(embedding_stores)}; got {self.embedding_store!r}."
+            )
         # CONFIG-VALIDATE-END
 
     @classmethod
@@ -1184,6 +1202,9 @@ class ProjectConfig:
             index_path=opt_path(env(_ENV_PREFIX, "INDEX_PATH")),
             state_path=opt_path(env(_ENV_PREFIX, "STATE_PATH")),
             embeddings_path=opt_path(env(_ENV_PREFIX, "EMBEDDINGS_PATH")),
+            embedding_store=(env(_ENV_PREFIX, "EMBEDDING_STORE") or "numpy")
+            .strip()
+            .lower(),
             indexed_fields=(_indexed := opt_list(env(_ENV_PREFIX, "INDEXED_FIELDS"))),
             required_fields=opt_list(env(_ENV_PREFIX, "REQUIRED_FIELDS")),
             exclude=opt_list(env(_ENV_PREFIX, "EXCLUDE")),

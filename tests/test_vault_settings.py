@@ -602,3 +602,9 @@ class TestIndexOpensThroughTheRegistry:
             vault.index.build_index()
         finally:
             vault.close()
+
+
+class TestEmbeddingStoreSetting:
+    def test_reaches_vault_settings(self, tmp_path: Path) -> None:
+        settings = VaultSettings.from_project_config(ProjectConfig(source_dir=tmp_path))
+        assert settings.embedding_store == "numpy"

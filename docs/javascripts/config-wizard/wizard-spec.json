@@ -560,6 +560,14 @@
       "advancedGroup": "Indexing"
     },
     {
+      "id": "embedding_store",
+      "label": "Embedding Store",
+      "type": "text",
+      "var": "MARKDOWN_VAULT_MCP_EMBEDDING_STORE",
+      "help": "Where embeddings are stored. 'numpy' keeps them in files beside the index (or in memory without INDEX_PATH).",
+      "advancedGroup": "Indexing"
+    },
+    {
       "id": "indexed_fields",
       "label": "Indexed Fields",
       "type": "text",
