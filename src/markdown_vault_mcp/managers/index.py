@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from markdown_vault_mcp.interfaces import KeywordGraphIndex, VectorStore
+    from markdown_vault_mcp.managers._vector_slot import VectorStoreAccess
     from markdown_vault_mcp.providers import EmbeddingProvider
     from markdown_vault_mcp.scanner import ChunkStrategy
     from markdown_vault_mcp.tracker import ChangeTracker
@@ -122,6 +123,8 @@ class IndexManager:
             embedding provider per call in the cold-build, convergence, and
             inline-reindex paths. Defaults to the module constant
             ``_EMBEDDING_BATCH_SIZE``.
+        store_access: Passed to ``EmbeddingsManager``: opens, refreshes and
+            describes the vault's store.
     """
 
     def __init__(
@@ -144,6 +147,7 @@ class IndexManager:
         attachment_extensions: Sequence[str] | None = None,
         embed_text_builder: EmbedTextBuilder | None = None,
         embedding_batch_size: int = _EMBEDDING_BATCH_SIZE,
+        store_access: VectorStoreAccess | None = None,
     ) -> None:
         self._fts = fts
         self._tracker = tracker
@@ -180,6 +184,7 @@ class IndexManager:
             embedding_batch_size=embedding_batch_size,
             is_path_excluded=self._is_path_excluded,
             discover_candidates=self._discover_indexable_candidates,
+            store_access=store_access,
         )
 
     # ------------------------------------------------------------------

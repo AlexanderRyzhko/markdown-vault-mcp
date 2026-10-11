@@ -50,7 +50,6 @@ from markdown_vault_mcp.managers._ranking import (
 from markdown_vault_mcp.managers._ranking import (
     group_by_path as _group_by_path,
 )
-from markdown_vault_mcp.managers._vector_loader import load_or_self_heal
 from markdown_vault_mcp.okf import (
     OKF_FILTER_KEYS,
     OKF_RESERVED_FILENAMES,
@@ -89,7 +88,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from pathlib import Path
 
-    from markdown_vault_mcp.interfaces import KeywordGraphIndex, VectorStore
+    from markdown_vault_mcp.interfaces import EmbeddingStore, KeywordGraphIndex
+    from markdown_vault_mcp.managers._vector_slot import VectorStoreSlot
     from markdown_vault_mcp.managers.link import LinkManager
     from markdown_vault_mcp.okf import OkfDetector
     from markdown_vault_mcp.providers import EmbeddingProvider
@@ -182,6 +182,8 @@ class SearchManager:
         embed_text_format: The current embedding-text format token; a
             persisted vector sidecar with a different token routes to
             ``rebuild_embeddings``.
+        vector_slot: The vault's vector store; ``None`` builds one from
+            *embeddings_path* and *embedding_provider* with the numpy backend.
     """
 
     def __init__(
@@ -203,6 +205,7 @@ class SearchManager:
         default_mode: str = "auto",
         folder_weights: dict[str, float] | None = None,
         embed_text_format: str = "v1",
+        vector_slot: VectorStoreSlot | None = None,
     ) -> None:
         self._fts = fts
         self._source_dir = source_dir
@@ -231,21 +234,31 @@ class SearchManager:
         self._folder_weights = folder_weights
         self._embed_text_format = embed_text_format
 
-        # Vector index is loaded lazily, from the sidecars or empty in memory.
-        self._vectors: VectorStore | None = None
+        if vector_slot is None:
+            from markdown_vault_mcp.managers._vector_slot import VectorStoreSlot
+            from markdown_vault_mcp.stores.numpy_sidecar import NumpySidecarBackend
+
+            vector_slot = VectorStoreSlot(
+                backend=NumpySidecarBackend(),
+                location=embeddings_path,
+                provider=embedding_provider,
+                text_format=embed_text_format,
+            )
+        # The vector store is opened lazily through the slot (#1777).
+        self._slot = vector_slot
 
     # ------------------------------------------------------------------
     # Vector index property (shared with IndexManager's EmbeddingsManager)
     # ------------------------------------------------------------------
 
     @property
-    def vectors(self) -> VectorStore | None:
-        """Return the lazily-loaded vector index, or ``None``."""
-        return self._vectors
+    def vectors(self) -> EmbeddingStore | None:
+        """Return the installed vector store, or ``None`` until it is opened."""
+        return self._slot.current()
 
     @vectors.setter
-    def vectors(self, value: VectorStore | None) -> None:
-        self._vectors = value
+    def vectors(self, value: EmbeddingStore | None) -> None:
+        self._slot.replace_any(value)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -319,49 +332,40 @@ class SearchManager:
                 "mode='keyword' instead."
             )
 
-    def _load_vectors(self) -> VectorStore:
-        """Load or return the cached vector store, self-healing corrupt sidecars.
+    def _load_vectors(self) -> EmbeddingStore | None:
+        """Open or return the vault's vector store through its slot (#1777).
 
-        Delegates to
-        :func:`markdown_vault_mcp.managers._vector_loader.load_or_self_heal`
-        over this manager's shared index slot; see there for the full
-        self-heal contract.
+        See :class:`~markdown_vault_mcp.managers._vector_slot.VectorStoreSlot`
+        for what happens when the store will not open.
 
         Returns:
-            The loaded :class:`~markdown_vault_mcp.interfaces.VectorStore`.
+            The store, or ``None`` when it is held in memory and not built
+            yet: there is nothing to search then.
 
         Raises:
             RuntimeError: If called without a prior ``_require_vectors()``
                 (``_embedding_provider`` is ``None``).
-            VectorIndexUnusableError: If the sidecar is unusable and this
-                manager has no ``rebuild_embeddings``.
-            ValueError: If a self-heal rebuild fails to produce a usable index.
+            VectorIndexUnusableError: If the store is corrupt or of another
+                identity and this manager has no ``rebuild_embeddings``.
+            ValueError: If a rebuild fails to produce a usable store.
         """
-        if self._vectors is not None:
-            return self._vectors
         if self._embedding_provider is None:
             raise RuntimeError(
                 "_require_vectors() must be called before _load_vectors()"
             )
-        if self._embeddings_path is None:
-            # Held in memory (#1708) and not built yet: answer from an empty
-            # index without installing it. The writer thread owns the slot,
-            # and installing here could replace the index a running
-            # build_embeddings is filling, losing its vectors.
-            from markdown_vault_mcp.vector_index import VectorIndex
+        if self._slot.current() is None and self._slot.location is None:
+            # Held in memory (#1708) and not built yet: there is nothing to
+            # search. Opening here would install a store over the one a
+            # running build_embeddings is filling, and computing the identity
+            # would probe the provider, which may be down.
+            return None
+        return self._slot.get(rebuild=self._rebuild_embeddings)
 
-            return VectorIndex(
-                self._embedding_provider, embed_text_format=self._embed_text_format
-            )
-        return load_or_self_heal(
-            embeddings_path=self._embeddings_path,
-            embedding_provider=self._embedding_provider,
-            get_vectors=lambda: self._vectors,
-            set_vectors=lambda v: setattr(self, "_vectors", v),
-            rebuild=self._rebuild_embeddings,
-            logger=logger,
-            embed_text_format=self._embed_text_format,
-        )
+    def _query_vector(self, query: str) -> list[float]:
+        """Embed *query* the way the index embeds queries."""
+        if self._embedding_provider is None:  # pragma: no cover - guarded by callers
+            raise RuntimeError("_require_vectors() must be called first")
+        return self._embedding_provider.embed_query([query])[0]
 
     def _get_frontmatter(self, path: str) -> dict[str, Any]:
         """Return the frontmatter dict for a document from the FTS index.
@@ -1057,10 +1061,12 @@ class SearchManager:
             filters=filters,
             okf_filters=okf_filters,
         )
-        raw = vectors.search(
-            query,
-            limit=candidate_limit,
-            predicate=self._folder_predicate(folder),
+        raw = (
+            vectors.search(
+                self._query_vector(query), limit=candidate_limit, folder=folder
+            )
+            if vectors is not None and vectors.count
+            else []
         )
 
         filtered = self._post_filter_semantic_rows(
@@ -1125,10 +1131,12 @@ class SearchManager:
         )
 
         vectors = self._load_vectors()
-        vec_raw = vectors.search(
-            query,
-            limit=vec_candidate_limit,
-            predicate=self._folder_predicate(folder),
+        vec_raw = (
+            vectors.search(
+                self._query_vector(query), limit=vec_candidate_limit, folder=folder
+            )
+            if vectors is not None and vectors.count
+            else []
         )
         vec_filtered = self._post_filter_semantic_rows(
             vec_raw, filters=filters, okf_filters=okf_filters
@@ -1628,8 +1636,8 @@ class SearchManager:
                 "mode='keyword' for the note's key terms."
             )
 
-        self._load_vectors()
-        if self._vectors is None or self._vectors.count == 0:
+        store = self._load_vectors()
+        if store is None or store.count == 0:
             return []
 
         eff_cpf = (
@@ -1650,7 +1658,7 @@ class SearchManager:
             # yields one result. This widening has always been here; it just
             # answers a different question than the post-filter one above.
             candidate_limit = max(candidate_limit * 4, 200)
-        raw_results = self._vectors.search_by_path(
+        raw_results = store.similar_to_document(
             path,
             limit=candidate_limit,
             predicate=self._folder_predicate(folder),

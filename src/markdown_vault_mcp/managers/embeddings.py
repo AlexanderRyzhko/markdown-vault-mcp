@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
     from markdown_vault_mcp.embed_text import EmbedTextBuilder
     from markdown_vault_mcp.interfaces import KeywordIndex, VectorStore
+    from markdown_vault_mcp.managers._vector_slot import VectorStoreAccess
     from markdown_vault_mcp.providers import EmbeddingProvider
     from markdown_vault_mcp.scanner import ChunkStrategy
     from markdown_vault_mcp.types import ParsedNote
@@ -99,6 +100,9 @@ class EmbeddingsManager:
         discover_candidates: Injected source-tree discovery (the owner's
             ``_discover_indexable_candidates``), used by the authoritative
             empty-build check's source walk.
+        store_access: Opens, refreshes and describes the vault's store;
+            ``None`` keeps the sidecar loader and an in-memory
+            ``VectorIndex``, for managers built without a vault.
     """
 
     def __init__(
@@ -116,6 +120,7 @@ class EmbeddingsManager:
         embedding_batch_size: int = _EMBEDDING_BATCH_SIZE,
         is_path_excluded: Callable[[str], bool],
         discover_candidates: Callable[..., list[tuple[Path, str]]],
+        store_access: VectorStoreAccess | None = None,
     ) -> None:
         self._fts = fts
         self._source_dir = source_dir
@@ -129,6 +134,7 @@ class EmbeddingsManager:
         self._embedding_batch_size = embedding_batch_size
         self._is_path_excluded = is_path_excluded
         self._discover_candidates = discover_candidates
+        self._store_access = store_access
 
     # ------------------------------------------------------------------
     # Shared-path accessors (read by IndexManager's FTS pipeline)
@@ -369,6 +375,8 @@ class EmbeddingsManager:
             raise RuntimeError(
                 "_require_vectors() must be called before _load_vectors()"
             )
+        if self._store_access is not None:
+            return self._store_access.open()
         if self._embeddings_path is None:
             # Nothing on disk to load: start empty, filled by build_embeddings.
             from markdown_vault_mcp.vector_index import VectorIndex
@@ -485,6 +493,17 @@ class EmbeddingsManager:
     # Embeddings
     # ------------------------------------------------------------------
 
+    def _install_fresh_vectors(self, provider: EmbeddingProvider) -> None:
+        """Install an empty vector index to rebuild into."""
+        if self._store_access is not None:
+            self._set_vectors(self._store_access.fresh())
+            return
+        from markdown_vault_mcp.vector_index import VectorIndex
+
+        self._set_vectors(
+            VectorIndex(provider, embed_text_format=self._embed_builder.format_token())
+        )
+
     def build_embeddings(self, *, force: bool = False) -> int:
         """Build or converge the vector index against the FTS index.
 
@@ -531,14 +550,8 @@ class EmbeddingsManager:
                 "_require_vectors() must be called before build_embeddings()"
             )
 
-        from markdown_vault_mcp.vector_index import VectorIndex
-
         if force:
-            vi = VectorIndex(
-                self._embedding_provider,
-                embed_text_format=self._embed_builder.format_token(),
-            )
-            self._set_vectors(vi)
+            self._install_fresh_vectors(self._embedding_provider)
         else:
             self._load_vectors()
             vectors = self._get_vectors()
@@ -1009,18 +1022,22 @@ class EmbeddingsManager:
 
         Returns:
             Dict with keys ``provider``, ``chunk_count``, ``path``,
-            ``available``. ``path`` is ``None`` when the vectors are held in
-            memory (#1708).
+            ``available``, and the store's ``backend``, ``identity`` and
+            ``generation`` (``None`` until it is opened). ``path`` is
+            ``None`` when the vectors are held in memory (#1708).
 
         Raises:
             OSError: If a sidecar file cannot be statted (#1625).
         """
+        no_store = {"backend": None, "identity": None, "generation": None}
         if self._embedding_provider is None:
+            # No provider, no store: nothing to describe.
             return {
                 "available": False,
                 "provider": None,
                 "chunk_count": 0,
                 "path": None,
+                **no_store,
             }
 
         vectors = self._get_vectors()
@@ -1032,31 +1049,36 @@ class EmbeddingsManager:
             # (Path.with_suffix), so an EMBEDDINGS_PATH that carries an
             # extension resolves to the real files instead of {path}.npy.npy
             # and misreporting chunk_count=0 (#819).
-            npy_path = self._embeddings_path.with_suffix(".npy")
+            # Both layouts keep the rows in the JSON: the legacy pair beside
+            # {base}.npy and the store's commit file naming {base}.m<N>.npy.
+            json_path = self._embeddings_path.with_suffix(".json")
             # A refused stat raises: a status of "no vectors" for a store the
             # server cannot read would be wrong (#1625).
-            if path_exists(npy_path):
-                json_path = self._embeddings_path.with_suffix(".json")
-                if path_exists(json_path):
-                    try:
-                        with json_path.open(encoding="utf-8") as fh:
-                            loaded_meta = json.load(fh)
-                        if isinstance(loaded_meta, list):
-                            count = len(loaded_meta)
-                        else:
-                            count = len(loaded_meta.get("rows", []))
-                    except (OSError, json.JSONDecodeError) as exc:
-                        logger.warning(
-                            "embeddings_status_metadata_read_failed path=%s err=%s",
-                            json_path,
-                            exc,
-                        )
+            if path_exists(json_path):
+                try:
+                    with json_path.open(encoding="utf-8") as fh:
+                        loaded_meta = json.load(fh)
+                    if isinstance(loaded_meta, list):
+                        count = len(loaded_meta)
+                    else:
+                        count = len(loaded_meta.get("rows", []))
+                except (OSError, json.JSONDecodeError) as exc:
+                    logger.warning(
+                        "embeddings_status_metadata_read_failed path=%s err=%s",
+                        json_path,
+                        exc,
+                    )
 
         return {
             "available": True,
             "provider": type(self._embedding_provider).__name__,
             "chunk_count": count,
             "path": str(self._embeddings_path) if self._embeddings_path else None,
+            **(
+                self._store_access.describe()
+                if self._store_access is not None
+                else no_store
+            ),
         }
 
     # ------------------------------------------------------------------

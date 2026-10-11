@@ -49,6 +49,8 @@ vault.close()
 
 `close()` releases what the vault opened: its index, its writer thread and the write-callback queue. The collaborators you pass in (`embedding_provider`, `summarizer`, `git_strategy`, `on_write`) stay yours. Close them after the vault, so a git push flush follows the drained commits.
 
+Pass `vector_store=` to use a vector store you opened (the vault never closes or rebuilds it) or `vector_backend=` to choose the backend the vault opens and closes its store with.
+
 ## Migrating from 4.x
 
 The 31 configuration keywords on `Vault` have been removed. Move each value to the same-named field on `VaultSettings`. Replace `Vault(source_dir=root, read_only=False, index_path=index)` with:

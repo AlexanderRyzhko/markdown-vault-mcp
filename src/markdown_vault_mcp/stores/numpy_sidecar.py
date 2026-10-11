@@ -30,7 +30,7 @@ import logging
 import os
 import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import IO, TYPE_CHECKING, Any
@@ -155,11 +155,32 @@ def _commit_file(path: Path, data: bytes) -> None:
     _write_atomic(path, lambda fh: fh.write(data))
 
 
-def _remove_stale(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-    except OSError as exc:
-        logger.warning("numpy_store_stale_matrix_kept path=%s err=%s", path, exc)
+def _numbered_matrices(base: Path) -> dict[int, Path]:
+    """Return the ``{base}.m{seq}.npy`` matrices beside *base*, by ``seq``."""
+    prefix, suffix = base.with_suffix(".m").name, ".npy"
+    found: dict[int, Path] = {}
+    for path in base.parent.glob(f"{prefix}*{suffix}"):
+        seq = path.name[len(prefix) : -len(suffix)]
+        if seq.isdigit():
+            found[int(seq)] = path
+    return found
+
+
+def _sweep(base: Path, keep: Path) -> None:
+    """Remove every matrix beside *base* except *keep*: superseded or orphaned."""
+    stale = [base.with_suffix(".npy"), *_numbered_matrices(base).values()]
+    for path in stale:
+        if path == keep:
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("numpy_store_stale_matrix_kept path=%s err=%s", path, exc)
+
+
+def _highest_seq(base: Path) -> int:
+    """Return the highest ``m{seq}`` matrix number beside *base*, 0 if none."""
+    return max(_numbered_matrices(base), default=0)
 
 
 def _payload(snap: _Snapshot, matrix_name: str, seq: int) -> bytes:
@@ -436,9 +457,8 @@ class NumpySidecarStore:
             matrix_path, lambda fh: np.save(fh, np.ascontiguousarray(snap.matrix))
         )
         _commit_file(self._base.with_suffix(".json"), data)
-        previous, self._seq, self._matrix_path = self._matrix_path, seq, matrix_path
-        if previous is not None and previous != matrix_path:
-            _remove_stale(previous)
+        self._seq, self._matrix_path = seq, matrix_path
+        _sweep(self._base, matrix_path)
         logger.debug(
             "numpy_store_checkpointed path=%s rows=%d generation=%d",
             self._base,
@@ -651,7 +671,8 @@ def _check_identity(
     dimension = stored.dimension or (
         matrix.shape[1] if matrix.ndim == 2 and matrix.shape[0] else 0
     )
-    if dimension and dimension != identity.dimension:
+    # An identity of dimension 0 does not know it yet: the stored one stands.
+    if dimension and identity.dimension and dimension != identity.dimension:
         raise _outcome(
             StoreIncompatibleError,
             f"Vector store at {where} holds dimension {dimension}, not {identity.dimension}.",
@@ -662,6 +683,11 @@ def _check_identity(
 def _snapshot_from(
     stored: _Stored, matrix: Any, identity: EmbeddingIdentity, where: str
 ) -> _Snapshot:
+    if not identity.dimension:
+        known = stored.dimension or (
+            matrix.shape[1] if matrix.ndim == 2 and matrix.shape[0] else 0
+        )
+        identity = replace(identity, dimension=known)
     if matrix.size == 0:
         matrix = np.zeros((0, identity.dimension), dtype=np.float32)
     if matrix.ndim != 2 or matrix.shape[0] != len(stored.rows):
@@ -799,6 +825,34 @@ class NumpySidecarBackend:
                 _fresh(identity), base=None, read_only=False, seq=0, matrix_path=None
             )
         return _open_file(Path(location), identity, read_only=not owns_files)
+
+    def open_fresh(
+        self, location: Path | str | None, identity: EmbeddingIdentity
+    ) -> NumpySidecarStore:
+        """Open *location* as an empty store at *identity*, reading nothing there.
+
+        The next persist commits over whatever the location held, under a
+        matrix name above every one already there.
+
+        Raises:
+            ImportError: If numpy is not installed.
+        """
+        if not _NUMPY_AVAILABLE:  # pragma: no cover - exercised only without the extra
+            raise ImportError(
+                "NumpySidecarBackend requires 'numpy'. "
+                "Install it with: pip install 'markdown-vault-mcp[embeddings]'"
+            )
+        if location is None or str(location) == ":memory:":
+            return NumpySidecarStore(
+                _fresh(identity), base=None, read_only=False, seq=0, matrix_path=None
+            )
+        base = Path(location)
+        seq = _highest_seq(base) if is_directory(base.parent) else 0
+        # Not dirty: a rebuild that writes nothing (every provider call
+        # failed) must not commit an empty store over the previous one.
+        return NumpySidecarStore(
+            _fresh(identity), base=base, read_only=False, seq=seq, matrix_path=None
+        )
 
 
 register_backend("vector", _BACKEND_NAME, NumpySidecarBackend)

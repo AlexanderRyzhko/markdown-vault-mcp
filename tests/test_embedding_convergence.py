@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastmcp import Client
 
+from markdown_vault_mcp.managers._legacy_vector_writes import LegacyVectorWrites
 from markdown_vault_mcp.vault import Vault, VaultSettings
 from markdown_vault_mcp.vector_index import VectorIndex
 from tests.conftest import (
@@ -68,6 +69,24 @@ def _boot(vault_dir: Path, tmp_path: Path, provider: MockEmbeddingProvider) -> V
     return vault
 
 
+def _stored(
+    tmp_path: Path, provider: MockEmbeddingProvider, *, writable: bool = False
+) -> LegacyVectorWrites:
+    """The store a booted vault wrote at ``tmp_path / "vectors"``, read the old way.
+
+    Opened with the default text format, which is what ``_boot``'s vault uses.
+    """
+    from markdown_vault_mcp.embed_text import EmbedTextBuilder
+    from markdown_vault_mcp.stores.numpy_sidecar import NumpySidecarBackend
+    from markdown_vault_mcp.types import EmbeddingIdentity
+
+    identity = EmbeddingIdentity.of(provider, EmbedTextBuilder().format_token())
+    store = NumpySidecarBackend().open(
+        tmp_path / "vectors", identity, owns_files=writable
+    )
+    return LegacyVectorWrites(store, provider)
+
+
 def _track_embeds(provider: MockEmbeddingProvider) -> list[list[str]]:
     """Record every batch of texts passed to ``provider.embed()``."""
     original_embed = provider.embed
@@ -100,8 +119,9 @@ class TestBootEmbeddingConvergence:
         assert count1 > 0
         v1.close()
 
-        npy = tmp_path / "vectors.npy"
-        mtime_before = npy.stat().st_mtime_ns
+        # Every save rewrites the commit file, so its mtime shows a save.
+        commit = tmp_path / "vectors.json"
+        mtime_before = commit.stat().st_mtime_ns
         calls = _track_embeds(provider)
         v2 = _boot(vault_dir, tmp_path, provider)
 
@@ -109,7 +129,7 @@ class TestBootEmbeddingConvergence:
         assert v2.index.embeddings_status()["chunk_count"] == count1
         assert count1 == v2._fts.count_chunks()
         # A converged index must not be re-saved.
-        assert npy.stat().st_mtime_ns == mtime_before
+        assert commit.stat().st_mtime_ns == mtime_before
         v2.close()
 
     def test_boot_embeds_documents_added_while_down(self, tmp_path: Path) -> None:
@@ -161,7 +181,7 @@ class TestBootEmbeddingConvergence:
         count1 = v1.index.embeddings_status()["chunk_count"]
         v1.close()
 
-        doomed = VectorIndex.load(tmp_path / "vectors", provider)
+        doomed = _stored(tmp_path, provider)
         doomed_chunks = len(doomed.chunks_by_path()["note_2.md"])
         assert doomed_chunks > 0
 
@@ -178,7 +198,7 @@ class TestBootEmbeddingConvergence:
         )
         v2.close()
 
-        persisted = VectorIndex.load(tmp_path / "vectors", provider)
+        persisted = _stored(tmp_path, provider)
         assert "note_2.md" not in persisted.chunks_by_path()
 
     def test_boot_refreshes_vectors_for_documents_modified_while_down(
@@ -206,7 +226,7 @@ class TestBootEmbeddingConvergence:
         assert v2.index.embeddings_status()["chunk_count"] == v2._fts.count_chunks()
         v2.close()
 
-        persisted = VectorIndex.load(tmp_path / "vectors", provider)
+        persisted = _stored(tmp_path, provider)
         by_path = persisted.chunks_by_path()
         assert all("gardening" in r["content"] for r in by_path["note_1.md"])
         # No stale vector metadata for the old content remains anywhere.
@@ -235,7 +255,7 @@ class TestBootEmbeddingConvergence:
         }
         v2.close()
 
-        persisted = VectorIndex.load(tmp_path / "vectors", provider)
+        persisted = _stored(tmp_path, provider)
         vec_lines = {
             (r["content"], r["start_line"])
             for r in persisted.chunks_by_path()["note_1.md"]
@@ -258,11 +278,11 @@ class TestBootEmbeddingConvergence:
 
         # Corrupt the sidecar the way the old code path did: drop some
         # documents' vectors while FTS keeps them.
-        vectors = VectorIndex.load(tmp_path / "vectors", provider)
+        vectors = _stored(tmp_path, provider, writable=True)
         dropped = vectors.delete_by_path("note_0.md")
         dropped += vectors.delete_by_path("note_3.md")
         assert dropped > 0
-        vectors.save(tmp_path / "vectors")
+        vectors.store.close()
 
         calls = _track_embeds(provider)
         v2 = _boot(vault_dir, tmp_path, provider)
@@ -273,7 +293,7 @@ class TestBootEmbeddingConvergence:
         assert v2.index.embeddings_status()["chunk_count"] == fts_chunks
         v2.close()
 
-        persisted = VectorIndex.load(tmp_path / "vectors", provider)
+        persisted = _stored(tmp_path, provider)
         by_path = persisted.chunks_by_path()
         assert "note_0.md" in by_path
         assert "note_3.md" in by_path
@@ -343,7 +363,7 @@ class TestBootEmbeddingConvergence:
         assert v2.index.embeddings_status()["chunk_count"] == count1
         v2.close()
 
-        persisted = VectorIndex.load(tmp_path / "vectors", provider)
+        persisted = _stored(tmp_path, provider)
         rows = persisted.chunks_by_path()["note_1.md"]
         # The stale (pre-modification) vectors are still searchable rather
         # than deleted-without-replacement.

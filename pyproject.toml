@@ -467,6 +467,10 @@ ignore = ["E501"]
 # any string default named token as a password. Gate-only, as above: an
 # inline noqa is stripped as unused by the base pass (RUF100).
 "tests/fixtures/vector_store_contract.py" = ["S107"]
+# VectorStoreSlot takes its backend, location, provider, text format, ownership
+# and an optional injected store as keyword-only construction arguments; a
+# parameter object for one constructor is ceremony. Gate-only, as above.
+"src/markdown_vault_mcp/managers/_vector_slot.py" = ["PLR0913"]
 # PROJECT-RUFF-IGNORES-END
 
 [tool.ruff.lint.isort]

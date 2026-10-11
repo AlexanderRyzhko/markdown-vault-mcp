@@ -213,7 +213,11 @@ def test_sabsa_repro_one_reference_doc_dedups_target_chunks(tmp_path):
     # Sanity check: long.md must actually produce multiple chunks for the
     # regression test to be meaningful.  If it doesn't, fixture sizing or
     # the adaptive chunker has drifted and the test should be updated.
-    long_chunks = [m for m in col._vectors._metadata if m["path"] == "long.md"]
+    long_chunks = [
+        m
+        for m in [m for rows in col._vectors.chunks_by_path().values() for m in rows]
+        if m["path"] == "long.md"
+    ]
     assert len(long_chunks) >= 2, (
         f"long.md must produce >= 2 chunks for this regression to be "
         f"meaningful; got {len(long_chunks)} chunks "

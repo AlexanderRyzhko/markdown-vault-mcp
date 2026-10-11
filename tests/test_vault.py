@@ -314,7 +314,12 @@ class TestBuildIndex:
         col1.index.build_index()
         col1.index.build_embeddings()
         assert col1._vectors is not None
-        vec_paths1 = [m["path"] for m in col1._vectors._metadata]
+        vec_paths1 = [
+            m["path"]
+            for m in [
+                m for rows in col1._vectors.chunks_by_path().values() for m in rows
+            ]
+        ]
         assert ".claude/test.md" in vec_paths1
 
         # Phase 2: reindex WITH exclude_patterns — stale doc purged from both.
@@ -333,7 +338,12 @@ class TestBuildIndex:
         assert ".claude/test.md" not in paths2
         # Vectors should also be purged (loaded via _load_vectors before purge).
         assert col2._vectors is not None
-        vec_paths2 = [m["path"] for m in col2._vectors._metadata]
+        vec_paths2 = [
+            m["path"]
+            for m in [
+                m for rows in col2._vectors.chunks_by_path().values() for m in rows
+            ]
+        ]
         assert ".claude/test.md" not in vec_paths2
 
     def test_build_index_purges_stale_excluded_docs(
@@ -389,7 +399,12 @@ class TestBuildIndex:
         col1.index.build_index()
         col1.index.build_embeddings()
         assert col1._vectors is not None
-        vec_paths1 = [m["path"] for m in col1._vectors._metadata]
+        vec_paths1 = [
+            m["path"]
+            for m in [
+                m for rows in col1._vectors.chunks_by_path().values() for m in rows
+            ]
+        ]
         assert ".claude/test.md" in vec_paths1
 
         # Phase 2: force=True rebuild applies the new exclude_patterns to
@@ -410,7 +425,12 @@ class TestBuildIndex:
         assert ".claude/test.md" not in paths2
         # Vectors loaded and purged, then saved back to disk.
         assert col2._vectors is not None
-        vec_paths2 = [m["path"] for m in col2._vectors._metadata]
+        vec_paths2 = [
+            m["path"]
+            for m in [
+                m for rows in col2._vectors.chunks_by_path().values() for m in rows
+            ]
+        ]
         assert ".claude/test.md" not in vec_paths2
 
 
@@ -3298,9 +3318,9 @@ class TestBuildEmbeddings:
         assert len(batch_sizes) > 1, "expected multiple embed() calls for large corpus"
         for size in batch_sizes:
             assert size <= _EMBEDDING_BATCH_SIZE
-        # The .npy file must exist (saved at the end).
-        npy_path = tmp_path / "embeddings.npy"
-        assert npy_path.exists()
+        # The store was saved at the end: its commit file and one matrix.
+        assert (tmp_path / "embeddings.json").exists()
+        assert list(tmp_path.glob("embeddings.m*.npy"))
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 # Importing the backend module registers it; the vault then opens the index
 # through the registry, as every store will (#1766).
+import markdown_vault_mcp.stores.numpy_sidecar  # registers the numpy backend
 import markdown_vault_mcp.stores.sqlite_keyword  # noqa: F401
 
 # _DEFAULT_STATE_* are re-exported here for backwards compatibility (the
@@ -31,6 +32,7 @@ from markdown_vault_mcp.config_sections.vault_settings import (
 )
 from markdown_vault_mcp.conventions import ConventionsResolver
 from markdown_vault_mcp.embed_text import EmbedTextBuilder
+from markdown_vault_mcp.exceptions import ConfigurationError
 from markdown_vault_mcp.facets import (
     GraphFacet,
     IndexFacet,
@@ -40,6 +42,7 @@ from markdown_vault_mcp.facets import (
 )
 from markdown_vault_mcp.indexing import IndexWriteCoordinator
 from markdown_vault_mcp.indexing.head_reconciler import IndexHeadReconciler
+from markdown_vault_mcp.managers._vector_slot import VectorStoreAccess, VectorStoreSlot
 from markdown_vault_mcp.okf import (
     OkfAuditReport,
     OkfDetector,
@@ -67,7 +70,8 @@ if TYPE_CHECKING:
     from markdown_vault_mcp._commit_scope import CommitScope
     from markdown_vault_mcp.git import PullResult, VersionedStore
     from markdown_vault_mcp.indexing.head_reconciler import ReconcileOutcome
-    from markdown_vault_mcp.interfaces import VectorStore
+    from markdown_vault_mcp.interfaces import EmbeddingStore, VectorBackend
+    from markdown_vault_mcp.managers._legacy_vector_writes import LegacyVectorWrites
     from markdown_vault_mcp.providers import EmbeddingProvider
     from markdown_vault_mcp.summarizer import Summarizer
     from markdown_vault_mcp.types import (
@@ -244,6 +248,19 @@ class Vault:
             :meth:`close` leaves closing it to the caller (#1765).
         chunk_strategy: ``"heading"`` (default), ``"whole"``, or a custom
             :class:`~markdown_vault_mcp.scanner.ChunkStrategy` instance.
+        vector_store: An open vector store to use instead of opening one;
+            the caller owns it: the vault never rebuilds or closes it.
+        vector_backend: The backend the vault opens its vector store with,
+            instead of the one ``settings.embedding_store`` names; the vault
+            owns and closes the store it opens.
+
+    Raises:
+        StoreUnavailableError: If the keyword index cannot be opened; so do
+            ``StoreCorruptError`` and ``StoreUnsupportedSchemaError`` (#1766).
+        ConfigurationError: If ``settings.embedding_store`` names no
+            registered backend.
+        ValueError: If ``vector_store`` is given without an
+            ``embedding_provider``, or the chunk strategy is unknown.
     """
 
     # The public boundary keeps the root, settings, and five collaborators explicit.
@@ -257,6 +274,8 @@ class Vault:
         git_strategy: VersionedStore | None = None,
         on_write: WriteCallback | None = None,
         chunk_strategy: str | ChunkStrategy = "heading",
+        vector_store: EmbeddingStore | None = None,
+        vector_backend: VectorBackend | None = None,
     ) -> None:
         if settings is None:
             settings = VaultSettings()
@@ -265,6 +284,8 @@ class Vault:
         self._summarizer = summarizer
         self._on_write = on_write
         self._git_strategy = git_strategy
+        self._injected_vector_store = vector_store
+        self._injected_vector_backend = vector_backend
         self._configure(settings, chunk_strategy)
         self._build_managers(settings)
         self._build_facets(settings)
@@ -380,6 +401,33 @@ class Vault:
         if settings.owns_index_files:
             _adopt_legacy_state_file(self._source_dir, self._state_path)
 
+    def _build_vector_slot(self, settings: VaultSettings) -> VectorStoreSlot:
+        """Build the slot that opens, rebuilds and closes the vault's vector store.
+
+        Raises:
+            ValueError: If a vector store was injected without a provider.
+            ConfigurationError: If ``settings.embedding_store`` names no
+                registered backend.
+        """
+        if self._injected_vector_store is not None and self._embedding_provider is None:
+            raise ValueError(
+                "vector_store needs an embedding_provider: the vault embeds queries."
+            )
+        backend = self._injected_vector_backend
+        if backend is None:
+            try:
+                backend = get_backend("vector", settings.embedding_store)()  # type: ignore[assignment]
+            except LookupError as exc:
+                raise ConfigurationError(str(exc)) from exc
+        return VectorStoreSlot(
+            backend=backend,  # type: ignore[arg-type]
+            location=self._embeddings_path,
+            provider=self._embedding_provider,
+            text_format=self._embed_builder.format_token(),
+            owns_files=settings.owns_index_files,
+            store=self._injected_vector_store,
+        )
+
     def _build_managers(self, settings: VaultSettings) -> None:
         """Construct the index/tracker sub-modules and the manager layer.
 
@@ -434,6 +482,7 @@ class Vault:
         #    self._search_mgr; they are only called at runtime after all
         #    managers are constructed.  No write_lock — the IndexWriter
         #    thread is the sole mutator of indices (#559).
+        self._vector_slot = self._build_vector_slot(settings)
         self._index_mgr = IndexManager(
             fts=self._fts,
             tracker=self._tracker,
@@ -446,8 +495,19 @@ class Vault:
             indexed_frontmatter_fields=self._indexed_frontmatter_fields,
             # Late-binding closures: self._search_mgr is assigned below and
             # only accessed at call-time, not during IndexManager.__init__.
-            get_vectors=lambda: self._search_mgr.vectors,
-            set_vectors=lambda v: setattr(self._search_mgr, "vectors", v),
+            get_vectors=lambda: self._vector_slot.legacy(),
+            set_vectors=lambda v: self._vector_slot.replace_any(v),
+            store_access=VectorStoreAccess(
+                open=lambda: self._vector_slot.legacy_get(
+                    rebuild=(
+                        (lambda: self._index_mgr.build_embeddings(force=True))
+                        if settings.owns_index_files
+                        else None
+                    )
+                ),
+                fresh=lambda: self._vector_slot.legacy_fresh(),
+                describe=self._vector_slot.describe,
+            ),
             embed_model_name=self._embed_model_name,
             max_chunk_chars_override=self._max_chunk_chars_override,
             title_field=self._title_field,
@@ -500,6 +560,7 @@ class Vault:
             default_mode=settings.default_search_mode,
             folder_weights=settings.folder_weights,
             embed_text_format=self._embed_builder.format_token(),
+            vector_slot=self._vector_slot,
         )
         # Deferred write callback (issue #175): the git-commit on_write
         # callback runs on a background worker so write methods return after
@@ -947,6 +1008,11 @@ class Vault:
         # itself is its owner's to close (#1765).
         self._write_callback.close(timeout=30.0)
 
+        # Close the vector store the vault opened; it persists what is
+        # pending. An injected store is its owner's (#1765, #1777).
+        if hasattr(self, "_vector_slot"):
+            self._vector_slot.close()
+
         # 4. Close SQLite.
         self._fts.close()
 
@@ -959,13 +1025,13 @@ class Vault:
         self._coordinator.require_built()
 
     @property
-    def _vectors(self) -> VectorStore | None:
-        """Bridge property: vector index is owned by SearchManager."""
-        return self._search_mgr.vectors
+    def _vectors(self) -> LegacyVectorWrites | None:
+        """Bridge property: the write paths' view of the vault's vector store."""
+        return self._vector_slot.legacy()
 
     @_vectors.setter
-    def _vectors(self, value: VectorStore | None) -> None:
-        self._search_mgr.vectors = value
+    def _vectors(self, value: object) -> None:
+        self._vector_slot.replace_any(value)
 
     # ------------------------------------------------------------------
     # Path validation helpers

@@ -371,7 +371,14 @@ def test_failed_refresh_does_not_starve_healthy_embeddings(
                 # Wait for the follow-up embedding job despite retained FTS work.
                 col._coordinator.writer.submit(FlushDirtyEmbeddings()).result(5)
                 assert col._vectors is not None
-                assert name in {m["path"] for m in col._vectors._metadata}
+                assert name in {
+                    m["path"]
+                    for m in [
+                        m
+                        for rows in col._vectors.chunks_by_path().values()
+                        for m in rows
+                    ]
+                }
                 assert col.index.get_index_status()["dirty_paths"] >= 2
                 assert sum("healthy1.md" in text for text in embedded) == 1
             before_edit = len(embedded)

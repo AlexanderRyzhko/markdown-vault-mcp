@@ -73,7 +73,7 @@ export MARKDOWN_VAULT_MCP_TEMPLATES_FOLDER=/path/to/examples/para/templates
 export MARKDOWN_VAULT_MCP_PROMPTS_FOLDER=/path/to/examples/para/prompts
 
 # Embeddings (optional, but recommended — project-kickoff resurface relies on semantic search)
-export MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH=/path/to/vault/.vault/embeddings.npy
+export MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH=/path/to/vault/.vault/embeddings
 export MARKDOWN_VAULT_MCP_EMBEDDING_PROVIDER=fastembed
 
 # Persistence

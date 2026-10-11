@@ -28,6 +28,8 @@ _NON_SETTINGS_PARAMS = {
     "git_strategy",
     "on_write",
     "chunk_strategy",
+    "vector_store",
+    "vector_backend",
     "settings",
 }
 
@@ -345,6 +347,9 @@ class TestStateLocation:
             "provider": "MockEmbeddingProvider",
             "chunk_count": 0,
             "path": None,
+            "backend": "numpy",
+            "identity": None,
+            "generation": None,
         }
         assert hits == []
         assert installed is None
@@ -365,7 +370,8 @@ class TestStateLocation:
             vault.index.build_embeddings()
         finally:
             vault.close()
-        assert (tmp_path / "state" / "index-db-embeddings.npy").is_file()
+        assert (tmp_path / "state" / "index-db-embeddings.json").is_file()
+        assert list((tmp_path / "state").glob("index-db-embeddings.m*.npy"))
         assert sorted(p.name for p in root.rglob("*")) == ["a.md"]
 
     def test_legacy_location_chosen_explicitly_is_not_reported(
@@ -602,3 +608,9 @@ class TestIndexOpensThroughTheRegistry:
             vault.index.build_index()
         finally:
             vault.close()
+
+
+class TestEmbeddingStoreSetting:
+    def test_reaches_vault_settings(self, tmp_path: Path) -> None:
+        settings = VaultSettings.from_project_config(ProjectConfig(source_dir=tmp_path))
+        assert settings.embedding_store == "numpy"
