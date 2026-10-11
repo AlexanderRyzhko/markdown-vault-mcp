@@ -3940,7 +3940,13 @@ starting points live under <code>examples/</code>: <code>obsidian-readonly.env</
 <td><code>MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH</code></td>
 <td>(none)</td>
 <td>No</td>
-<td>Base path for the embeddings files. Defaults beside INDEX_PATH (index-db-embeddings.npy and .json beside index.db); without INDEX_PATH the vectors are kept in memory and rebuilt at each start. Setting it also lets the provider be auto-detected.</td>
+<td>Base path for the embeddings files. Defaults beside INDEX_PATH (index-db-embeddings.json and the matrix it names beside index.db); without INDEX_PATH the vectors are kept in memory and rebuilt at each start. Setting it also lets the provider be auto-detected.</td>
+</tr>
+<tr>
+<td><code>MARKDOWN_VAULT_MCP_EMBEDDING_STORE</code></td>
+<td><code>numpy</code></td>
+<td>No</td>
+<td>Where embeddings are stored. 'numpy' keeps them in files beside the index (or in memory without INDEX_PATH).</td>
 </tr>
 <tr>
 <td><code>MARKDOWN_VAULT_MCP_INDEXED_FIELDS</code></td>

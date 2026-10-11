@@ -3550,7 +3550,7 @@ how the <code>voyage</code> provider embeds.</p>
 <p class="admonition-title">Voyage vaults re-embed once on upgrade</p>
 <p>Vaults embedded before this behavior existed hold vectors Voyage produced
 with no <code>input_type</code> at all. Those sit in a different space from the typed
-ones, so the vector sidecar's identity check fails on the first startup
+ones, so the embeddings files' identity check fails on the first startup
 after the upgrade and the vault re-embeds itself once, exactly as it does
 after a model change. The rebuild is automatic; it costs one pass of Voyage
 API calls over the vault.</p>
@@ -3628,16 +3628,16 @@ provider.</p>
 <h3 id="caveats-worth-knowing">Caveats worth knowing<a class="headerlink" href="#caveats-worth-knowing" title="Permanent link">&para;</a></h3>
 <div class="admonition warning">
 <p class="admonition-title">Changing only the base URL is invisible to the index</p>
-<p>The vector sidecar records the provider name, the model name, and how
+<p>The embeddings files record the provider name, the model name, and how
 that provider embeds, and a mismatch on startup re-embeds the vault
 automatically. Under this recipe the first two stay <code>openai</code> and your
 configured model string no matter which vendor serves them, and the
 third is always empty, so aiming <code>OPENAI_BASE_URL</code> at a different vendor
 while keeping the same model name goes undetected: vectors from two
 different models end up in one index, and search quality degrades
-quietly. Force the rebuild yourself by deleting the two sidecar files
-(the <code>.npy</code> matrix and the <code>.json</code> metadata, at <code>EMBEDDINGS_PATH</code> or
-beside the index) and restarting.</p>
+quietly. Force the rebuild yourself by deleting the embeddings files
+(the <code>.json</code> file and the <code>.m&lt;N&gt;.npy</code> matrix it names, at
+<code>EMBEDDINGS_PATH</code> or beside the index) and restarting.</p>
 </div>
 <div class="admonition note">
 <p class="admonition-title">Unknown context length falls back to a 1500-character chunk cap</p>
@@ -3683,7 +3683,7 @@ reach.</p>
 <p>Regardless of which provider you choose:</p>
 <ul>
 <li><strong>Setting <code>MARKDOWN_VAULT_MCP_EMBEDDING_PROVIDER</code> turns search by meaning on.</strong> Left unset, the provider is auto-detected only when <code>MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH</code> is set.</li>
-<li><strong>Where the vectors live.</strong> At <code>MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH</code> when set, otherwise beside <code>MARKDOWN_VAULT_MCP_INDEX_PATH</code> (<code>index-db-embeddings.npy</code> and <code>.json</code> beside <code>index.db</code>). With neither set, they are held in memory and every note is embedded again at each start, which a paid provider bills each time. The Claude Desktop bundle and the Claude Code plugin set no index path yet, so a provider picked on their install screen embeds again at each Claude Desktop launch or Claude Code session (<a href="https://github.com/pvliesdonk/markdown-vault-mcp/issues/1728">#1728</a>).</li>
+<li><strong>Where the vectors live.</strong> At <code>MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH</code> when set, otherwise beside <code>MARKDOWN_VAULT_MCP_INDEX_PATH</code> (<code>index-db-embeddings.json</code> and the <code>index-db-embeddings.m&lt;N&gt;.npy</code> matrix it names, beside <code>index.db</code>). <code>MARKDOWN_VAULT_MCP_EMBEDDING_STORE</code> names the store that keeps them; <code>numpy</code>, the default and only value, keeps these files. With neither set, they are held in memory and every note is embedded again at each start, which a paid provider bills each time. The Claude Desktop bundle and the Claude Code plugin set no index path yet, so a provider picked on their install screen embeds again at each Claude Desktop launch or Claude Code session (<a href="https://github.com/pvliesdonk/markdown-vault-mcp/issues/1728">#1728</a>).</li>
 <li>Embeddings are built automatically on first startup when a provider is configured. Later starts load the stored vectors and only process changed files.</li>
 <li>The build runs in the background. <code>embeddings_status</code> reports <code>available: true</code> as soon as a provider is configured, whether or not the build has run. The build has caught up once <a href="../../reference/tools/indexing/#get_index_status"><code>get_index_status</code></a> shows <code>status</code> as <code>"queryable"</code>, <code>queue_depth</code> as <code>0</code>, <code>in_flight</code> as <code>null</code>, and <code>dirty_paths</code> and <code>dirty_embeddings</code> as <code>0</code>.</li>
 <li>Use <code>mode="hybrid"</code> in search for best results; it combines keyword (BM25) and semantic (cosine similarity) scores using Reciprocal Rank Fusion.</li>

@@ -229,6 +229,18 @@ Bases: `VectorReader`, `VectorPublisher`, `StoreLifecycle`, `Protocol`
 
 What a vector backend opens: read, publish and close (#1767).
 
+## `VectorBackend`
+
+Bases: `StoreBackend[EmbeddingStore]`, `Protocol`
+
+A backend that opens vector stores, including a fresh one (#1777).
+
+### `open_fresh(location, identity)`
+
+Open *location* as an empty store at *identity*, reading nothing there.
+
+What the location holds stays in place until the fresh store's first persist replaces it, so a rebuild that never completes leaves the previous data for the next open. Used to rebuild a store that would not open (corrupt) or holds another identity.
+
 ## `EmbeddingIdentity(provider, model, variant, text_format, dimension)`
 
 The embedding space a vector store's rows belong to.
@@ -237,13 +249,13 @@ Two stores hold comparable vectors only when every field matches: the same provi
 
 Attributes:
 
-| Name          | Type  | Description                                                        |
-| ------------- | ----- | ------------------------------------------------------------------ |
-| `provider`    | `str` | The provider's name (EmbeddingProvider.provider_name).             |
-| `model`       | `str` | The model's name.                                                  |
-| `variant`     | `str` | How the provider embeds (provider_variant), "" for most providers. |
-| `text_format` | `str` | The embedding-text format token (EmbedTextBuilder.format_token()). |
-| `dimension`   | `int` | Floats per vector.                                                 |
+| Name          | Type  | Description                                                                                                                                                           |
+| ------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `provider`    | `str` | The provider's name (EmbeddingProvider.provider_name).                                                                                                                |
+| `model`       | `str` | The model's name.                                                                                                                                                     |
+| `variant`     | `str` | How the provider embeds (provider_variant), "" for most providers.                                                                                                    |
+| `text_format` | `str` | The embedding-text format token (EmbedTextBuilder.format_token()).                                                                                                    |
+| `dimension`   | `int` | Floats per vector; 0 when not known yet, in which case a store opened against the identity takes the dimension it has stored (and refuses writes until it knows one). |
 
 ### `of(provider, text_format)`
 
@@ -323,6 +335,18 @@ Raises:
 | `StoreCorruptError`           | If they do not form a store.             |
 | `StoreUnsupportedSchemaError` | If their format is newer.                |
 | `StoreIncompatibleError`      | If they hold another identity.           |
+
+### `open_fresh(location, identity)`
+
+Open *location* as an empty store at *identity*, reading nothing there.
+
+The next persist commits over whatever the location held, under a matrix name above every one already there.
+
+Raises:
+
+| Type          | Description                |
+| ------------- | -------------------------- |
+| `ImportError` | If numpy is not installed. |
 
 ## `NumpySidecarStore(snapshot, *, base, read_only, seq, matrix_path)`
 

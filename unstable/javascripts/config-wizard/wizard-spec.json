@@ -556,7 +556,15 @@
       "label": "Embeddings Path",
       "type": "text",
       "var": "MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH",
-      "help": "Base path for the embeddings files. Defaults beside INDEX_PATH (index-db-embeddings.npy and .json beside index.db); without INDEX_PATH the vectors are kept in memory and rebuilt at each start. Setting it also lets the provider be auto-detected.",
+      "help": "Base path for the embeddings files. Defaults beside INDEX_PATH (index-db-embeddings.json and the matrix it names beside index.db); without INDEX_PATH the vectors are kept in memory and rebuilt at each start. Setting it also lets the provider be auto-detected.",
+      "advancedGroup": "Indexing"
+    },
+    {
+      "id": "embedding_store",
+      "label": "Embedding Store",
+      "type": "text",
+      "var": "MARKDOWN_VAULT_MCP_EMBEDDING_STORE",
+      "help": "Where embeddings are stored. 'numpy' keeps them in files beside the index (or in memory without INDEX_PATH).",
       "advancedGroup": "Indexing"
     },
     {

@@ -2007,7 +2007,7 @@ Voyage's models are tuned for retrieval, and the vendor asks callers to say whic
 
 Voyage vaults re-embed once on upgrade
 
-Vaults embedded before this behavior existed hold vectors Voyage produced with no `input_type` at all. Those sit in a different space from the typed ones, so the vector sidecar's identity check fails on the first startup after the upgrade and the vault re-embeds itself once, exactly as it does after a model change. The rebuild is automatic; it costs one pass of Voyage API calls over the vault.
+Vaults embedded before this behavior existed hold vectors Voyage produced with no `input_type` at all. Those sit in a different space from the typed ones, so the embeddings files' identity check fails on the first startup after the upgrade and the vault re-embeds itself once, exactly as it does after a model change. The rebuild is automatic; it costs one pass of Voyage API calls over the vault.
 
 Voyage must be selected explicitly
 
@@ -2085,7 +2085,7 @@ The one addition is vendor-specific and reached only through a named provider: [
 
 Changing only the base URL is invisible to the index
 
-The vector sidecar records the provider name, the model name, and how that provider embeds, and a mismatch on startup re-embeds the vault automatically. Under this recipe the first two stay `openai` and your configured model string no matter which vendor serves them, and the third is always empty, so aiming `OPENAI_BASE_URL` at a different vendor while keeping the same model name goes undetected: vectors from two different models end up in one index, and search quality degrades quietly. Force the rebuild yourself by deleting the two sidecar files (the `.npy` matrix and the `.json` metadata, at `EMBEDDINGS_PATH` or beside the index) and restarting.
+The embeddings files record the provider name, the model name, and how that provider embeds, and a mismatch on startup re-embeds the vault automatically. Under this recipe the first two stay `openai` and your configured model string no matter which vendor serves them, and the third is always empty, so aiming `OPENAI_BASE_URL` at a different vendor while keeping the same model name goes undetected: vectors from two different models end up in one index, and search quality degrades quietly. Force the rebuild yourself by deleting the embeddings files (the `.json` file and the `.m<N>.npy` matrix it names, at `EMBEDDINGS_PATH` or beside the index) and restarting.
 
 Unknown context length falls back to a 1500-character chunk cap
 
@@ -2122,7 +2122,7 @@ Set `MARKDOWN_VAULT_MCP_EMBEDDING_PROVIDER` explicitly to avoid surprises when y
 Regardless of which provider you choose:
 
 - **Setting `MARKDOWN_VAULT_MCP_EMBEDDING_PROVIDER` turns search by meaning on.** Left unset, the provider is auto-detected only when `MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH` is set.
-- **Where the vectors live.** At `MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH` when set, otherwise beside `MARKDOWN_VAULT_MCP_INDEX_PATH` (`index-db-embeddings.npy` and `.json` beside `index.db`). With neither set, they are held in memory and every note is embedded again at each start, which a paid provider bills each time. The Claude Desktop bundle and the Claude Code plugin set no index path yet, so a provider picked on their install screen embeds again at each Claude Desktop launch or Claude Code session ([#1728](https://github.com/pvliesdonk/markdown-vault-mcp/issues/1728)).
+- **Where the vectors live.** At `MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH` when set, otherwise beside `MARKDOWN_VAULT_MCP_INDEX_PATH` (`index-db-embeddings.json` and the `index-db-embeddings.m<N>.npy` matrix it names, beside `index.db`). `MARKDOWN_VAULT_MCP_EMBEDDING_STORE` names the store that keeps them; `numpy`, the default and only value, keeps these files. With neither set, they are held in memory and every note is embedded again at each start, which a paid provider bills each time. The Claude Desktop bundle and the Claude Code plugin set no index path yet, so a provider picked on their install screen embeds again at each Claude Desktop launch or Claude Code session ([#1728](https://github.com/pvliesdonk/markdown-vault-mcp/issues/1728)).
 - Embeddings are built automatically on first startup when a provider is configured. Later starts load the stored vectors and only process changed files.
 - The build runs in the background. `embeddings_status` reports `available: true` as soon as a provider is configured, whether or not the build has run. The build has caught up once [`get_index_status`](https://pvliesdonk.github.io/markdown-vault-mcp/unstable/reference/tools/indexing/#get_index_status) shows `status` as `"queryable"`, `queue_depth` as `0`, `in_flight` as `null`, and `dirty_paths` and `dirty_embeddings` as `0`.
 - Use `mode="hybrid"` in search for best results; it combines keyword (BM25) and semantic (cosine similarity) scores using Reciprocal Rank Fusion.
@@ -4514,7 +4514,8 @@ Boolean values accept `true`, `1`, or `yes` case-insensitively. Ready-made start
 | -------------------------------------- | ------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `MARKDOWN_VAULT_MCP_INDEX_PATH`        | (none)  | No       | Path to the SQLite FTS5 index file; unset keeps the index in memory. Set it for persistence across restarts.                                                                                                                                                                         |
 | `MARKDOWN_VAULT_MCP_STATE_PATH`        | (none)  | No       | Path to the change-tracking state file. Defaults to INDEX_PATH plus .state.json (index.db.state.json beside index.db); without INDEX_PATH the state is kept in memory. Never written into the vault by default.                                                                      |
-| `MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH`   | (none)  | No       | Base path for the embeddings files. Defaults beside INDEX_PATH (index-db-embeddings.npy and .json beside index.db); without INDEX_PATH the vectors are kept in memory and rebuilt at each start. Setting it also lets the provider be auto-detected.                                 |
+| `MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH`   | (none)  | No       | Base path for the embeddings files. Defaults beside INDEX_PATH (index-db-embeddings.json and the matrix it names beside index.db); without INDEX_PATH the vectors are kept in memory and rebuilt at each start. Setting it also lets the provider be auto-detected.                  |
+| `MARKDOWN_VAULT_MCP_EMBEDDING_STORE`   | `numpy` | No       | Where embeddings are stored. 'numpy' keeps them in files beside the index (or in memory without INDEX_PATH).                                                                                                                                                                         |
 | `MARKDOWN_VAULT_MCP_INDEXED_FIELDS`    | (none)  | No       | Comma-separated frontmatter fields promoted to the tag index for structured filtering. Changing it cold-rebuilds the index once on next startup; SEARCHABLE_FIELDS inherits this value when unset.                                                                                   |
 | `MARKDOWN_VAULT_MCP_REQUIRED_FIELDS`   | (none)  | No       | Comma-separated frontmatter fields required on every document; documents missing any are excluded from the index.                                                                                                                                                                    |
 | `MARKDOWN_VAULT_MCP_EXCLUDE`           | (none)  | No       | Comma-separated glob patterns excluded from scanning (.obsidian/**,.trash/**).                                                                                                                                                                                                       |
@@ -5362,6 +5363,9 @@ Dict with the following fields:
 - provider (str | None): Provider class name when configured (such as `"OllamaProvider"`), or null if not configured.
 - `chunk_count` (int): Number of chunks currently in the vector index.
 - path (str | None): Vector index file path when persisted, or null when the vectors are held in memory or not configured.
+- backend (str | None): Name of the store holding the vectors (such as `"numpy"`), or null if no provider is configured.
+- identity (dict | None): The provider, model, variant, text format and dimension the stored vectors were embedded with, or null until the store is first opened.
+- generation (int | None): Count of full rebuilds the store has published, or null until the store is first opened.
 
 ## `get_index_status`
 
@@ -6590,6 +6594,8 @@ vault.close()
 
 `close()` releases what the vault opened: its index, its writer thread and the write-callback queue. The collaborators you pass in (`embedding_provider`, `summarizer`, `git_strategy`, `on_write`) stay yours. Close them after the vault, so a git push flush follows the drained commits.
 
+Pass `vector_store=` to use a vector store you opened (the vault never closes or rebuilds it) or `vector_backend=` to choose the backend the vault opens and closes its store with.
+
 ## Migrating from 4.x
 
 The 31 configuration keywords on `Vault` have been removed. Move each value to the same-named field on `VaultSettings`. Replace `Vault(source_dir=root, read_only=False, index_path=index)` with:
@@ -6617,7 +6623,7 @@ Link conversion, index generation, rename with `update_links=True`, and folder m
 
 ## API Reference
 
-## `VaultSettings(index_path=None, embeddings_path=None, read_only=True, write_protect_existing=False, report_unresolved_links=False, state_path=None, indexed_frontmatter_fields=None, required_frontmatter=None, git_pull_interval_s=0, exclude_patterns=None, attachment_extensions=None, max_attachment_size_mb=1.0, max_note_read_bytes=262144, chunks_per_file=2, snippet_words=200, length_downweight_alpha=0.25, default_search_mode='auto', max_chunk_words=400, max_chunk_chars=None, max_chunk_chars_override=None, chunk_overlap_words=0, summarize_max_notes=50, summarize_max_input_chars=200000, title_field='title', searchable_frontmatter_fields=None, embed_context=False, embedding_batch_size=4, folder_weights=None, fts_weights=None, conventions_file='_conventions.md', okf_mode='auto', okf_write=False, owns_index_files=True)`
+## `VaultSettings(index_path=None, embeddings_path=None, embedding_store='numpy', read_only=True, write_protect_existing=False, report_unresolved_links=False, state_path=None, indexed_frontmatter_fields=None, required_frontmatter=None, git_pull_interval_s=0, exclude_patterns=None, attachment_extensions=None, max_attachment_size_mb=1.0, max_note_read_bytes=262144, chunks_per_file=2, snippet_words=200, length_downweight_alpha=0.25, default_search_mode='auto', max_chunk_words=400, max_chunk_chars=None, max_chunk_chars_override=None, chunk_overlap_words=0, summarize_max_notes=50, summarize_max_input_chars=200000, title_field='title', searchable_frontmatter_fields=None, embed_context=False, embedding_batch_size=4, folder_weights=None, fts_weights=None, conventions_file='_conventions.md', okf_mode='auto', okf_write=False, owns_index_files=True)`
 
 Config-derived construction settings for a :class:`~markdown_vault_mcp.vault.Vault`.
 
@@ -6629,6 +6635,7 @@ Attributes:
 | ------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `index_path`                    | \`Path             | None\`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `embeddings_path`               | \`Path             | None\`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `embedding_store`               | `str`              | The vector backend's registry name; "numpy" (the default) keeps the vectors in files at embeddings_path.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `owns_index_files`              | `bool`             | When True (default), this vault owns the index files on disk: the SQLite index, the vector sidecar and the state file. False is for a process that reads files another one owns, such as the CLI search reading a running server's index, and leaves them as they are: an on-disk index opens read-only and ranks with the weights stored in it (#1758), a search that finds the vector sidecar incompatible or corrupt raises :exc:~markdown_vault_mcp.exceptions.VectorIndexUnusableError instead of rebuilding it (#1734), and a pre-#1693 state file is not copied into place. An in-memory index is this process's own and stays writable. A library setting with no configuration knob behind it. |
 | `read_only`                     | `bool`             | When True (default), write operations raise :exc:~markdown_vault_mcp.exceptions.ReadOnlyError. This library default deliberately stays True even though the server's MARKDOWN_VAULT_MCP_READ_ONLY now defaults to False (#1113). They are separate tiers: the operator default is a product decision about what an installed server should do, while this one is a fail-safe for a downstream Python consumer who constructs a Vault without naming the argument. Keeping it costs nothing — the server path always passes the value explicitly through to_vault_settings — and moving it would be an independent breaking change to the public library interface.                                      |
 | `write_protect_existing`        | `bool`             | When True, a write that would overwrite an existing file without an if_match etag raises :exc:~markdown_vault_mcp.exceptions.DocumentExistsError (default False, i.e. writes overwrite unconditionally).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -6750,7 +6757,7 @@ Returns:
 | \`Path | None\`      |
 | \`Path | None\`      |
 
-## `Vault(*, source_dir, settings=None, embedding_provider=None, summarizer=None, git_strategy=None, on_write=None, chunk_strategy='heading')`
+## `Vault(*, source_dir, settings=None, embedding_provider=None, summarizer=None, git_strategy=None, on_write=None, chunk_strategy='heading', vector_store=None, vector_backend=None)`
 
 Facade over FTS5 index, vector index, and change tracker.
 
@@ -6775,6 +6782,16 @@ Parameters:
 | `git_strategy`       | \`VersionedStore    | None\`                                | Optional strategy for background Git tasks, started via :meth:start and stopped via :meth:stop. Injected, so :meth:close leaves closing it to the caller (#1765).                           |
 | `on_write`           | \`WriteCallback     | None\`                                | Callback invoked after successful writes; see :obj:~markdown_vault_mcp.types.WriteCallback. Injected, so :meth:close leaves closing it to the caller (#1765).                               |
 | `chunk_strategy`     | \`str               | ChunkStrategy\`                       | "heading" (default), "whole", or a custom :class:~markdown_vault_mcp.scanner.ChunkStrategy instance.                                                                                        |
+| `vector_store`       | \`EmbeddingStore    | None\`                                | An open vector store to use instead of opening one; the caller owns it: the vault never rebuilds or closes it.                                                                              |
+| `vector_backend`     | \`VectorBackend     | None\`                                | The backend the vault opens its vector store with, instead of the one settings.embedding_store names; the vault owns and closes the store it opens.                                         |
+
+Raises:
+
+| Type                    | Description                                                                                             |
+| ----------------------- | ------------------------------------------------------------------------------------------------------- |
+| `StoreUnavailableError` | If the keyword index cannot be opened; so do StoreCorruptError and StoreUnsupportedSchemaError (#1766). |
+| `ConfigurationError`    | If settings.embedding_store names no registered backend.                                                |
+| `ValueError`            | If vector_store is given without an embedding_provider, or the chunk strategy is unknown.               |
 
 ### `reader`
 
@@ -8261,6 +8278,18 @@ Bases: `VectorReader`, `VectorPublisher`, `StoreLifecycle`, `Protocol`
 
 What a vector backend opens: read, publish and close (#1767).
 
+## `VectorBackend`
+
+Bases: `StoreBackend[EmbeddingStore]`, `Protocol`
+
+A backend that opens vector stores, including a fresh one (#1777).
+
+### `open_fresh(location, identity)`
+
+Open *location* as an empty store at *identity*, reading nothing there.
+
+What the location holds stays in place until the fresh store's first persist replaces it, so a rebuild that never completes leaves the previous data for the next open. Used to rebuild a store that would not open (corrupt) or holds another identity.
+
 ## `EmbeddingIdentity(provider, model, variant, text_format, dimension)`
 
 The embedding space a vector store's rows belong to.
@@ -8269,13 +8298,13 @@ Two stores hold comparable vectors only when every field matches: the same provi
 
 Attributes:
 
-| Name          | Type  | Description                                                        |
-| ------------- | ----- | ------------------------------------------------------------------ |
-| `provider`    | `str` | The provider's name (EmbeddingProvider.provider_name).             |
-| `model`       | `str` | The model's name.                                                  |
-| `variant`     | `str` | How the provider embeds (provider_variant), "" for most providers. |
-| `text_format` | `str` | The embedding-text format token (EmbedTextBuilder.format_token()). |
-| `dimension`   | `int` | Floats per vector.                                                 |
+| Name          | Type  | Description                                                                                                                                                           |
+| ------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `provider`    | `str` | The provider's name (EmbeddingProvider.provider_name).                                                                                                                |
+| `model`       | `str` | The model's name.                                                                                                                                                     |
+| `variant`     | `str` | How the provider embeds (provider_variant), "" for most providers.                                                                                                    |
+| `text_format` | `str` | The embedding-text format token (EmbedTextBuilder.format_token()).                                                                                                    |
+| `dimension`   | `int` | Floats per vector; 0 when not known yet, in which case a store opened against the identity takes the dimension it has stored (and refuses writes until it knows one). |
 
 ### `of(provider, text_format)`
 
@@ -8355,6 +8384,18 @@ Raises:
 | `StoreCorruptError`           | If they do not form a store.             |
 | `StoreUnsupportedSchemaError` | If their format is newer.                |
 | `StoreIncompatibleError`      | If they hold another identity.           |
+
+### `open_fresh(location, identity)`
+
+Open *location* as an empty store at *identity*, reading nothing there.
+
+The next persist commits over whatever the location held, under a matrix name above every one already there.
+
+Raises:
+
+| Type          | Description                |
+| ------------- | -------------------------- |
+| `ImportError` | If numpy is not installed. |
 
 ## `NumpySidecarStore(snapshot, *, base, read_only, seq, matrix_path)`
 
@@ -8999,7 +9040,7 @@ Keep collaborator overrides on the corresponding `Vault` keyword arguments.
 
 ## API Reference
 
-## `ProjectConfig(server=ServerConfig(), server_name=_default_server_name(), source_dir=DEFAULT_SOURCE_DIR, read_only=False, write_protect_existing=True, report_unresolved_links=False, disable_apps_ui=False, index_path=None, state_path=None, embeddings_path=None, indexed_fields=None, required_fields=None, exclude=None, title_field='title', searchable_fields=None, templates_folder='_templates', prompts_folder=None, conventions_file='_conventions.md', okf_mode='auto', okf_write=False, okf_verify='elicit', attachment_extensions=None, max_attachment_size_mb=1.0, max_note_read_bytes=262144, default_search_mode='auto', chunks_per_file=2, snippet_words=200, length_downweight_alpha=0.25, max_chunk_words=400, max_chunk_chars=None, chunk_overlap_words=40, folder_weights=None, fts_weights=None, embedding_provider=None, ollama_host='http://localhost:11434', openai_api_key=None, voyage_api_key=None, voyage_model='voyage-4', ollama_model='nomic-embed-text', ollama_cpu_only=False, openai_base_url='https://api.openai.com/v1', openai_embedding_model='text-embedding-3-small', fastembed_model='BAAI/bge-small-en-v1.5', fastembed_cache_dir=None, embed_context=False, embed_timeout_s=30.0, embedding_batch_size=4, git_repo_url=None, git_token=None, git_username='x-access-token', git_pull_interval_s=600, git_push_delay_s=30.0, git_commit_name='markdown-vault-mcp', git_commit_email='noreply@markdown-vault-mcp', git_commit_name_claim=None, git_commit_email_claim=None, git_lfs=True, file_watcher=True, file_watcher_debounce_s=2.0, file_watcher_root_floor=True, boot_reindex=True, github_webhook_secret=None, gitlab_webhook_signing_token=None, gitlab_webhook_secret_token=None, summarize_provider=None, summarize_openai_api_key=None, summarize_openai_base_url=None, summarize_openai_model='gpt-5-mini', summarize_max_tokens=8192, summarize_max_notes=50, summarize_max_input_chars=200000, summarize_timeout=120.0, transfer=TransferConfig(), jobs=JobsConfig())`
+## `ProjectConfig(server=ServerConfig(), server_name=_default_server_name(), source_dir=DEFAULT_SOURCE_DIR, read_only=False, write_protect_existing=True, report_unresolved_links=False, disable_apps_ui=False, index_path=None, state_path=None, embeddings_path=None, embedding_store='numpy', indexed_fields=None, required_fields=None, exclude=None, title_field='title', searchable_fields=None, templates_folder='_templates', prompts_folder=None, conventions_file='_conventions.md', okf_mode='auto', okf_write=False, okf_verify='elicit', attachment_extensions=None, max_attachment_size_mb=1.0, max_note_read_bytes=262144, default_search_mode='auto', chunks_per_file=2, snippet_words=200, length_downweight_alpha=0.25, max_chunk_words=400, max_chunk_chars=None, chunk_overlap_words=40, folder_weights=None, fts_weights=None, embedding_provider=None, ollama_host='http://localhost:11434', openai_api_key=None, voyage_api_key=None, voyage_model='voyage-4', ollama_model='nomic-embed-text', ollama_cpu_only=False, openai_base_url='https://api.openai.com/v1', openai_embedding_model='text-embedding-3-small', fastembed_model='BAAI/bge-small-en-v1.5', fastembed_cache_dir=None, embed_context=False, embed_timeout_s=30.0, embedding_batch_size=4, git_repo_url=None, git_token=None, git_username='x-access-token', git_pull_interval_s=600, git_push_delay_s=30.0, git_commit_name='markdown-vault-mcp', git_commit_email='noreply@markdown-vault-mcp', git_commit_name_claim=None, git_commit_email_claim=None, git_lfs=True, file_watcher=True, file_watcher_debounce_s=2.0, file_watcher_root_floor=True, boot_reindex=True, github_webhook_secret=None, gitlab_webhook_signing_token=None, gitlab_webhook_secret_token=None, summarize_provider=None, summarize_openai_api_key=None, summarize_openai_base_url=None, summarize_openai_model='gpt-5-mini', summarize_max_tokens=8192, summarize_max_notes=50, summarize_max_input_chars=200000, summarize_timeout=120.0, transfer=TransferConfig(), jobs=JobsConfig())`
 
 Domain config for Markdown Vault MCP. Compose — don't inherit.
 
