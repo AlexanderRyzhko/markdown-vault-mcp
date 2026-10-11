@@ -127,6 +127,291 @@ Raises:
 | `StoreCorruptError`           | If the file is not a SQLite database.    |
 | `StoreUnsupportedSchemaError` | If its schema_version is newer.          |
 
+## Vector stores
+
+A vector store takes query vectors, not text: the caller embeds. Publication is conditional on the token the caller saw; `ANY_TOKEN` skips the comparison.
+
+## `VectorReader`
+
+Bases: `Protocol`
+
+Read a vector store: nearest rows, per-document rows, tokens (#1767).
+
+One call observes one committed state; a document is never half visible. The store holds no embedding provider: callers embed queries.
+
+### `identity`
+
+The embedding space of the rows the store holds.
+
+### `generation`
+
+Bumped each time :meth:`VectorPublisher.publish_generation` lands.
+
+### `count`
+
+The number of stored rows.
+
+### `search(vector, *, limit=10, predicate=None, folder=None)`
+
+Return the rows nearest *vector*, most similar first.
+
+Parameters:
+
+| Name        | Type                                   | Description                                      | Default                                                                                       |
+| ----------- | -------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| `vector`    | `Sequence[float]`                      | The query embedding, of the store's dimension.   | *required*                                                                                    |
+| `limit`     | `int`                                  | Maximum number of rows; zero or less returns []. | `10`                                                                                          |
+| `predicate` | \`Callable\[\[dict[str, Any]\], bool\] | None\`                                           | Keeps only the rows it accepts, applied before limit.                                         |
+| `folder`    | \`str                                  | None\`                                           | Keeps only rows in this folder or below it, applied before limit; a backend may push it down. |
+
+Returns:
+
+| Type                   | Description                                          |
+| ---------------------- | ---------------------------------------------------- |
+| `list[dict[str, Any]]` | Copies of the rows' metadata, each with a score: the |
+| `list[dict[str, Any]]` | normalised dot product, 0.0 for a zero vector.       |
+
+### `similar_to_document(path, *, limit=10, predicate=None)`
+
+Return the rows nearest the mean of *path*'s rows, excluding *path*.
+
+Returns:
+
+| Name | Type                   | Description                            |
+| ---- | ---------------------- | -------------------------------------- |
+| `As` | `list[dict[str, Any]]` | meth:search; [] when path has no rows. |
+
+### `rows_for(path)`
+
+Return *path*'s stored rows, vectors normalised, in storage order.
+
+### `tokens()`
+
+Return each stored document's token; `None` when unknown.
+
+## `VectorPublisher`
+
+Bases: `Protocol`
+
+Publish to a vector store, conditionally on the stored token (#1767).
+
+### `replace_document(document, *, expected_token)`
+
+Replace every row of `document.path` with `document.rows`.
+
+Parameters:
+
+| Name             | Type            | Description                                                                               | Default    |
+| ---------------- | --------------- | ----------------------------------------------------------------------------------------- | ---------- |
+| `document`       | `DocumentRows`  | The document's new rows and the token they came from.                                     | *required* |
+| `expected_token` | `ExpectedToken` | The token the caller saw when it read the source; ANY_TOKEN publishes whatever is stored. | *required* |
+
+Returns:
+
+| Type                 | Description                                              |
+| -------------------- | -------------------------------------------------------- |
+| `PublicationOutcome` | "published", or "conflict" when the stored token differs |
+| `PublicationOutcome` | from expected_token; nothing changes on a conflict.      |
+
+### `remove_document(path, *, expected_token)`
+
+Remove every row and the token of *path*, with the same condition.
+
+### `publish_generation(identity, documents)`
+
+Replace the whole store with *documents* under *identity*, in one step.
+
+A reader sees the previous generation until this returns; an interrupted publication leaves the previous generation in place.
+
+## `EmbeddingStore`
+
+Bases: `VectorReader`, `VectorPublisher`, `StoreLifecycle`, `Protocol`
+
+What a vector backend opens: read, publish and close (#1767).
+
+## `EmbeddingIdentity(provider, model, variant, text_format, dimension)`
+
+The embedding space a vector store's rows belong to.
+
+Two stores hold comparable vectors only when every field matches: the same provider, model and variant embed the same text format into the same number of dimensions.
+
+Attributes:
+
+| Name          | Type  | Description                                                        |
+| ------------- | ----- | ------------------------------------------------------------------ |
+| `provider`    | `str` | The provider's name (EmbeddingProvider.provider_name).             |
+| `model`       | `str` | The model's name.                                                  |
+| `variant`     | `str` | How the provider embeds (provider_variant), "" for most providers. |
+| `text_format` | `str` | The embedding-text format token (EmbedTextBuilder.format_token()). |
+| `dimension`   | `int` | Floats per vector.                                                 |
+
+### `of(provider, text_format)`
+
+Return the identity of *provider* embedding *text_format* text.
+
+Parameters:
+
+| Name          | Type                | Description                      | Default    |
+| ------------- | ------------------- | -------------------------------- | ---------- |
+| `provider`    | `EmbeddingProvider` | The embedding provider.          | *required* |
+| `text_format` | `str`               | The embedding-text format token. | *required* |
+
+Returns:
+
+| Type                | Description                                                   |
+| ------------------- | ------------------------------------------------------------- |
+| `EmbeddingIdentity` | The identity a store holding this provider's vectors records. |
+
+## `VectorRow(vector, metadata)`
+
+One stored chunk: its vector and the metadata returned with it.
+
+Attributes:
+
+| Name       | Type              | Description                                                          |
+| ---------- | ----------------- | -------------------------------------------------------------------- |
+| `vector`   | `Sequence[float]` | The embedding, as the provider returned it; the store normalises it. |
+| `metadata` | `dict[str, Any]`  | Every key the store hands back with a search result.                 |
+
+## `DocumentRows(path, token, rows)`
+
+Every row of one document, with the source revision they came from.
+
+Attributes:
+
+| Name    | Type                  | Description                         |
+| ------- | --------------------- | ----------------------------------- |
+| `path`  | `str`                 | The document's vault-relative path. |
+| `token` | \`RevisionToken       | None\`                              |
+| `rows`  | `Sequence[VectorRow]` | The document's rows, possibly none. |
+
+Raises:
+
+| Type         | Description                                         |
+| ------------ | --------------------------------------------------- |
+| `ValueError` | If a row's metadata["path"] names another document. |
+
+## `NumpySidecarBackend`
+
+Open a :class:`NumpySidecarStore` at a base path, or in memory.
+
+### `open(location, identity=None, *, owns_files=True)`
+
+Open the store.
+
+Parameters:
+
+| Name         | Type     | Description                                     | Default                                                                         |
+| ------------ | -------- | ----------------------------------------------- | ------------------------------------------------------------------------------- |
+| `location`   | \`Path   | str                                             | None\`                                                                          |
+| `identity`   | \`object | None\`                                          | The :class:~markdown_vault_mcp.types.EmbeddingIdentity the rows must belong to. |
+| `owns_files` | `bool`   | False opens files read-only; ignored in memory. | `True`                                                                          |
+
+Returns:
+
+| Type                | Description     |
+| ------------------- | --------------- |
+| `NumpySidecarStore` | The open store. |
+
+Raises:
+
+| Type                          | Description                              |
+| ----------------------------- | ---------------------------------------- |
+| `ImportError`                 | If numpy is not installed.               |
+| `ValueError`                  | If identity is not an EmbeddingIdentity. |
+| `StoreUnavailableError`       | If the files cannot be reached.          |
+| `StoreCorruptError`           | If they do not form a store.             |
+| `StoreUnsupportedSchemaError` | If their format is newer.                |
+| `StoreIncompatibleError`      | If they hold another identity.           |
+
+## `NumpySidecarStore(snapshot, *, base, read_only, seq, matrix_path)`
+
+A vector store held in memory, optionally persisted beside a base path.
+
+Construct through :class:`NumpySidecarBackend`.
+
+### `identity`
+
+The embedding space of the stored rows.
+
+### `generation`
+
+Bumped by each :meth:`publish_generation`.
+
+### `count`
+
+The number of stored rows.
+
+### `search(vector, *, limit=10, predicate=None, folder=None)`
+
+Return the rows nearest *vector*; see :class:`~markdown_vault_mcp.interfaces.VectorReader`.
+
+Raises:
+
+| Type         | Description                                |
+| ------------ | ------------------------------------------ |
+| `ValueError` | If vector is not of the store's dimension. |
+
+### `similar_to_document(path, *, limit=10, predicate=None)`
+
+Return the rows nearest the mean of *path*'s rows, excluding *path*.
+
+### `rows_for(path)`
+
+Return *path*'s rows, vectors normalised, in storage order.
+
+### `tokens()`
+
+Return each stored document's token; `None` when unknown.
+
+### `replace_document(document, *, expected_token)`
+
+Replace `document.path`'s rows; see :class:`~markdown_vault_mcp.interfaces.VectorPublisher`.
+
+Raises:
+
+| Type            | Description                                     |
+| --------------- | ----------------------------------------------- |
+| `ReadOnlyError` | If the store was opened read-only.              |
+| `ValueError`    | If a row is of another dimension or not finite. |
+
+### `remove_document(path, *, expected_token)`
+
+Remove *path*'s rows and token, with the same condition.
+
+Raises:
+
+| Type            | Description                        |
+| --------------- | ---------------------------------- |
+| `ReadOnlyError` | If the store was opened read-only. |
+
+### `publish_generation(identity, documents)`
+
+Replace the store with *documents* under *identity*, durably.
+
+Raises:
+
+| Type            | Description                                                              |
+| --------------- | ------------------------------------------------------------------------ |
+| `ReadOnlyError` | If the store was opened read-only.                                       |
+| `ValueError`    | If a path appears twice, or a row is of another dimension or not finite. |
+
+### `checkpoint()`
+
+Persist pending changes; a no-op in memory, read-only or clean.
+
+Raises:
+
+| Type           | Description             |
+| -------------- | ----------------------- |
+| `RuntimeError` | If the store is closed. |
+
+### `close()`
+
+Persist pending changes and release the store. Idempotent.
+
+The store is closed afterwards even if the final persist raises.
+
 ## Lifecycle
 
 ## `StoreLifecycle`
