@@ -463,6 +463,10 @@ ignore = ["E501"]
 "tests/test_docs_examples.py" = ["S102"]
 "tests/test_smoke.py" = ["TC002", "TC003"]
 "tests/test_server.py" = ["TC003"]
+# The vector conformance helper defaults a revision token ("t1"); S107 reads
+# any string default named token as a password. Gate-only, as above: an
+# inline noqa is stripped as unused by the base pass (RUF100).
+"tests/fixtures/vector_store_contract.py" = ["S107"]
 # PROJECT-RUFF-IGNORES-END
 
 [tool.ruff.lint.isort]

@@ -13,6 +13,9 @@ concrete classes:
   — the storage contract every store shares (#1766): how a store is opened
   and by whom it is closed, and the one question the indexing side asks a
   source about an identity.
+- :class:`VectorReader`, :class:`VectorPublisher` and :class:`EmbeddingStore`
+  — the vector store contract (#1767): vectors in, nearest rows out, with
+  no embedding provider inside the store.
 
 ``FTSIndex`` implements the first two over one SQLite database and
 ``VectorIndex`` implements the third over numpy; both satisfy these protocols
@@ -36,27 +39,36 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Sequence
     from pathlib import Path
 
     from markdown_vault_mcp.fts_index import ChunkingMeta
     from markdown_vault_mcp.types import (
+        DocumentRows,
+        EmbeddingIdentity,
+        ExpectedToken,
         FTSResult,
         ParsedNote,
+        PublicationOutcome,
+        RevisionToken,
         SkippedFile,
         SourceState,
         StoreFamily,
         SubtreeNote,
         TocEntry,
+        VectorRow,
     )
 
 __all__ = [
+    "EmbeddingStore",
     "GraphStore",
     "KeywordGraphIndex",
     "KeywordIndex",
     "SourceProbe",
     "StoreBackend",
     "StoreLifecycle",
+    "VectorPublisher",
+    "VectorReader",
     "VectorStore",
 ]
 
@@ -476,3 +488,115 @@ class SourceProbe(Protocol):
     def probe(self, path: str) -> SourceState:
         """Return whether *path* is present (with its token), absent or unavailable."""
         ...
+
+
+@runtime_checkable
+class VectorReader(Protocol):
+    """Read a vector store: nearest rows, per-document rows, tokens (#1767).
+
+    One call observes one committed state; a document is never half
+    visible. The store holds no embedding provider: callers embed queries.
+    """
+
+    @property
+    def identity(self) -> EmbeddingIdentity:
+        """The embedding space of the rows the store holds."""
+        ...
+
+    @property
+    def generation(self) -> int:
+        """Bumped each time :meth:`VectorPublisher.publish_generation` lands."""
+        ...
+
+    @property
+    def count(self) -> int:
+        """The number of stored rows."""
+        ...
+
+    def search(
+        self,
+        vector: Sequence[float],
+        *,
+        limit: int = 10,
+        predicate: Callable[[dict[str, Any]], bool] | None = None,
+        folder: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return the rows nearest *vector*, most similar first.
+
+        Args:
+            vector: The query embedding, of the store's dimension.
+            limit: Maximum number of rows; zero or less returns ``[]``.
+            predicate: Keeps only the rows it accepts, applied before
+                *limit*.
+            folder: Keeps only rows in this folder or below it, applied
+                before *limit*; a backend may push it down.
+
+        Returns:
+            Copies of the rows' metadata, each with a ``score``: the
+            normalised dot product, ``0.0`` for a zero vector.
+        """
+        ...
+
+    def similar_to_document(
+        self,
+        path: str,
+        *,
+        limit: int = 10,
+        predicate: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return the rows nearest the mean of *path*'s rows, excluding *path*.
+
+        Returns:
+            As :meth:`search`; ``[]`` when *path* has no rows.
+        """
+        ...
+
+    def rows_for(self, path: str) -> list[VectorRow]:
+        """Return *path*'s stored rows, vectors normalised, in storage order."""
+        ...
+
+    def tokens(self) -> dict[str, RevisionToken | None]:
+        """Return each stored document's token; ``None`` when unknown."""
+        ...
+
+
+@runtime_checkable
+class VectorPublisher(Protocol):
+    """Publish to a vector store, conditionally on the stored token (#1767)."""
+
+    def replace_document(
+        self, document: DocumentRows, *, expected_token: ExpectedToken
+    ) -> PublicationOutcome:
+        """Replace every row of ``document.path`` with ``document.rows``.
+
+        Args:
+            document: The document's new rows and the token they came from.
+            expected_token: The token the caller saw when it read the
+                source; ``ANY_TOKEN`` publishes whatever is stored.
+
+        Returns:
+            ``"published"``, or ``"conflict"`` when the stored token differs
+            from *expected_token*; nothing changes on a conflict.
+        """
+        ...
+
+    def remove_document(
+        self, path: str, *, expected_token: ExpectedToken
+    ) -> PublicationOutcome:
+        """Remove every row and the token of *path*, with the same condition."""
+        ...
+
+    def publish_generation(
+        self, identity: EmbeddingIdentity, documents: Iterable[DocumentRows]
+    ) -> None:
+        """Replace the whole store with *documents* under *identity*, in one step.
+
+        A reader sees the previous generation until this returns; an
+        interrupted publication leaves the previous generation in place.
+        """
+        ...
+
+
+@runtime_checkable
+class EmbeddingStore(VectorReader, VectorPublisher, StoreLifecycle, Protocol):
+    """What a vector backend opens: read, publish and close (#1767)."""

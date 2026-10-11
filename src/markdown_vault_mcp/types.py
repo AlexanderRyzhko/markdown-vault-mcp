@@ -5,10 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypeAlias
 
 if TYPE_CHECKING:
     from markdown_vault_mcp._identity import Principal
+    from markdown_vault_mcp.providers import EmbeddingProvider
 
 # The four deterministic, non-excluded skip categories surfaced via
 # get_index_status.skipped_files. A plain frozenset (not an enum) keeps the
@@ -1141,3 +1142,114 @@ class SourceState:
             raise ValueError("A present source carries a token.")
         if self.status != "present" and self.token is not None:
             raise ValueError(f"An {self.status} source carries no token.")
+
+
+# --- Vector store contract (#1767) --------------------------------------------
+
+
+@dataclass(frozen=True)
+class EmbeddingIdentity:
+    """The embedding space a vector store's rows belong to.
+
+    Two stores hold comparable vectors only when every field matches: the
+    same provider, model and variant embed the same text format into the
+    same number of dimensions.
+
+    Attributes:
+        provider: The provider's name (``EmbeddingProvider.provider_name``).
+        model: The model's name.
+        variant: How the provider embeds (``provider_variant``), ``""`` for
+            most providers.
+        text_format: The embedding-text format token
+            (``EmbedTextBuilder.format_token()``).
+        dimension: Floats per vector.
+    """
+
+    provider: str
+    model: str
+    variant: str
+    text_format: str
+    dimension: int
+
+    @classmethod
+    def of(cls, provider: EmbeddingProvider, text_format: str) -> EmbeddingIdentity:
+        """Return the identity of *provider* embedding *text_format* text.
+
+        Args:
+            provider: The embedding provider.
+            text_format: The embedding-text format token.
+
+        Returns:
+            The identity a store holding this provider's vectors records.
+        """
+        return cls(
+            provider=provider.provider_name,
+            model=provider.model_name,
+            variant=provider.provider_variant,
+            text_format=text_format,
+            dimension=int(provider.dimension),
+        )
+
+
+@dataclass(frozen=True)
+class VectorRow:
+    """One stored chunk: its vector and the metadata returned with it.
+
+    Attributes:
+        vector: The embedding, as the provider returned it; the store
+            normalises it.
+        metadata: Every key the store hands back with a search result.
+    """
+
+    vector: Sequence[float]
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class DocumentRows:
+    """Every row of one document, with the source revision they came from.
+
+    Attributes:
+        path: The document's vault-relative path.
+        token: The revision token of the source the rows were computed
+            from; ``None`` when unknown.
+        rows: The document's rows, possibly none.
+
+    Raises:
+        ValueError: If a row's ``metadata["path"]`` names another document.
+    """
+
+    path: str
+    token: RevisionToken | None
+    rows: Sequence[VectorRow]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "rows", tuple(self.rows))
+        for row in self.rows:
+            named = row.metadata.get("path", self.path)
+            if named != self.path:
+                raise ValueError(
+                    f"A row of {self.path} names another document: {named}."
+                )
+
+
+class _AnyToken:
+    """The type of :data:`ANY_TOKEN`; one instance exists."""
+
+    _instance: _AnyToken | None = None
+
+    def __new__(cls) -> _AnyToken:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "ANY_TOKEN"
+
+
+#: Passed as ``expected_token``: publish whatever the store holds for the
+#: document. ``None`` means something else: expect no token at all.
+ANY_TOKEN: Final = _AnyToken()
+
+#: What a publisher compares the stored token with before it publishes.
+ExpectedToken: TypeAlias = RevisionToken | _AnyToken | None

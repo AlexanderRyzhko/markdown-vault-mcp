@@ -3996,8 +3996,27 @@ failing, owning and identifying a store, and #1508 showed the embedding
 side could not tell an unavailable source from a deleted one. One contract,
 stated once, is cheaper than three that drift.
 
-Bounds: the vector facets (`VectorReader`, `VectorPublisher`,
-`EmbeddingIdentity`) are #1767's; the file-backed `SourceProbe` is #1768's.
+**The vector half (#1767).** `EmbeddingIdentity` names an embedding space
+(provider, model, variant, text format, dimension) and a store records it
+with each generation. `VectorReader` takes query vectors, not text: a
+store never holds a provider. `VectorPublisher.replace_document` takes a
+`DocumentRows` (path, token, rows) and an `expected_token`; `ANY_TOKEN`
+skips the comparison, `None` expects no token. `EmbeddingStore` combines
+both with `StoreLifecycle`. The numpy backend (`stores/numpy_sidecar.py`)
+holds one immutable snapshot that writers replace in one assignment, so a
+reader never sees a matrix and a row list that disagree. On disk the JSON
+is the commit point and names a matrix written under a new name per
+persist; `replace_document` publishes in memory and becomes durable at
+`checkpoint()`, while `publish_generation` is durable before it returns.
+One process writes a base path at a time, as with the `VectorIndex`
+sidecar: two writers would pick the same next matrix name. Another
+process opens it with `owns_files=False`, read-only. A sidecar
+`VectorIndex.save` wrote opens unchanged, its rows without tokens;
+after this store's first persist a 5.1 binary finds no `{base}.npy`
+and re-embeds once.
+
+Bounds: no consumer uses the new store until #1777; the write paths move
+in #1778; the file-backed `SourceProbe` is #1768's.
 
 ### `providers.py`: Embedding Providers
 
@@ -5920,3 +5939,4 @@ Later decisions (2026-10-08, #1503):
 |-|-|-|-|
 | 30 | Resource ownership | The vault closes what it opens; the caller closes what it injects (#1765). Applies to every store backend. | A store or strategy shared with another consumer must not be closed under it; one rule for every injected collaborator, stated in `docs/decisions/0001`. |
 | 31 | Store open outcomes | Five typed outcomes under `StoreOpenError`; only corrupt may self-heal, only when the vault owns the files; none reads as empty (#1766). | An unreachable or unknown store rebuilt as empty is how a server overwrites another process's index; the type says what the operator can do about it. |
+| 32 | Numpy store persistence | JSON commit point naming a per-persist matrix; in-memory publish with durability at checkpoint; `publish_generation` durable at once (#1767). | Crash-safe two-file commit without rewriting the whole matrix per document; write amplification is #1497's. |
