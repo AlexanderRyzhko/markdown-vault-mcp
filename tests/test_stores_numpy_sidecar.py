@@ -87,8 +87,9 @@ class TestClosed:
 
     def test_writes_to_a_read_only_store_are_refused(self, tmp_path: Path) -> None:
         store = NumpySidecarBackend().open(tmp_path / "vec", IDENT, owns_files=False)
+        document = doc("a.md", [[1, 0, 0]])
         with pytest.raises(ReadOnlyError, match="read-only"):
-            store.replace_document(doc("a.md", [[1, 0, 0]]), expected_token=ANY_TOKEN)
+            store.replace_document(document, expected_token=ANY_TOKEN)
 
 
 def _base(tmp_path: Path) -> Path:

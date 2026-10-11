@@ -4008,9 +4008,12 @@ reader never sees a matrix and a row list that disagree. On disk the JSON
 is the commit point and names a matrix written under a new name per
 persist; `replace_document` publishes in memory and becomes durable at
 `checkpoint()`, while `publish_generation` is durable before it returns.
-A sidecar `VectorIndex.save` wrote opens unchanged, its rows without
-tokens; after this store's first persist a 5.1 binary finds no
-`{base}.npy` and re-embeds once.
+One process writes a base path at a time, as with the `VectorIndex`
+sidecar: two writers would pick the same next matrix name. Another
+process opens it with `owns_files=False`, read-only. A sidecar
+`VectorIndex.save` wrote opens unchanged, its rows without tokens;
+after this store's first persist a 5.1 binary finds no `{base}.npy`
+and re-embeds once.
 
 Bounds: no consumer uses the new store until #1777; the write paths move
 in #1778; the file-backed `SourceProbe` is #1768's.
