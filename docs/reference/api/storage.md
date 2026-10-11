@@ -40,6 +40,8 @@ A vector store takes query vectors, not text: the caller embeds. Publication is 
 
 ::: markdown_vault_mcp.interfaces.EmbeddingStore
 
+::: markdown_vault_mcp.interfaces.VectorBackend
+
 ::: markdown_vault_mcp.types.EmbeddingIdentity
 
 ::: markdown_vault_mcp.types.VectorRow

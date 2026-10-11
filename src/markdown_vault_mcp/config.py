@@ -209,8 +209,8 @@ class ProjectConfig:
         metadata={
             "help": (
                 "Base path for the embeddings files. Defaults beside "
-                "INDEX_PATH (index-db-embeddings.npy and .json beside "
-                "index.db); without INDEX_PATH the vectors are kept in "
+                "INDEX_PATH (index-db-embeddings.json and the matrix it names "
+                "beside index.db); without INDEX_PATH the vectors are kept in "
                 "memory and rebuilt at each start. "
                 "Setting it also lets the provider be auto-detected."
             ),

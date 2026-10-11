@@ -57,7 +57,7 @@ export MARKDOWN_VAULT_MCP_TEMPLATES_FOLDER=/path/to/examples/zettelkasten/templa
 export MARKDOWN_VAULT_MCP_PROMPTS_FOLDER=/path/to/examples/zettelkasten/prompts
 
 # Embeddings (optional)
-export MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH=/path/to/vault/.vault/embeddings.npy
+export MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH=/path/to/vault/.vault/embeddings
 export MARKDOWN_VAULT_MCP_EMBEDDING_PROVIDER=fastembed  # or ollama, openai, voyage
 
 # Persistence

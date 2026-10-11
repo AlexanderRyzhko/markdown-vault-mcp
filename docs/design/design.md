@@ -3918,9 +3918,11 @@ Key methods:
   rebuild (#734).
 
 `VectorIndex` satisfies the `VectorStore` protocol (`interfaces.py`, #1230)
-structurally. The managers hold `VectorStore`; `_vector_loader.py` and
-`EmbeddingsManager` are the factory sites that still name `VectorIndex`
-concretely, because constructing one is exactly what they are for. `load()`
+structurally. A vault no longer builds one: its `VectorStoreSlot` opens
+the store through a `VectorBackend` (#1777). `_vector_loader.py` and
+`EmbeddingsManager` remain the factory sites for managers built without a
+vault, naming `VectorIndex` concretely, because constructing one is
+exactly what they are for. `load()`
 is deliberately outside the protocol for the same reason — how a backend is
 built is not part of what consumers ask of it.
 
@@ -4015,8 +4017,23 @@ process opens it with `owns_files=False`, read-only. A sidecar
 after this store's first persist a 5.1 binary finds no `{base}.npy`
 and re-embeds once.
 
-Bounds: no consumer uses the new store until #1777; the write paths move
-in #1778; the file-backed `SourceProbe` is #1768's.
+**The vault's slot (#1777).** `Vault` holds its vector store in a
+`VectorStoreSlot` that opens it on first use through the backend
+`EMBEDDING_STORE` names (or an injected `vector_backend`), or uses an
+injected `vector_store`, which stays the caller's. It opens with the
+provider, model, variant and text format from configuration and takes
+the dimension from the stored files, because `provider.dimension` is a
+network probe for several providers: stored vectors stay readable with
+the provider down. The writer path, which needs the provider anyway,
+checks the dimension before writing. On an owned store, corrupt or
+another identity rebuilds through `VectorBackend.open_fresh`; without
+ownership both raise `VectorIndexUnusableError`; unavailable and
+unsupported always propagate. `SearchManager` embeds queries itself; the
+write paths keep the released calls through `LegacyVectorWrites` until
+#1778.
+
+Bounds: the write paths move in #1778; the file-backed `SourceProbe` is
+#1768's; the store's size in `embeddings_status` is #1377's.
 
 ### `providers.py`: Embedding Providers
 
@@ -5938,5 +5955,5 @@ Later decisions (2026-10-08, #1503):
 | # | Topic | Decision | Rationale |
 |-|-|-|-|
 | 30 | Resource ownership | The vault closes what it opens; the caller closes what it injects (#1765). Applies to every store backend. | A store or strategy shared with another consumer must not be closed under it; one rule for every injected collaborator, stated in `docs/decisions/0001`. |
-| 31 | Store open outcomes | Five typed outcomes under `StoreOpenError`; only corrupt may self-heal, only when the vault owns the files; none reads as empty (#1766). | An unreachable or unknown store rebuilt as empty is how a server overwrites another process's index; the type says what the operator can do about it. |
+| 31 | Store open outcomes | Five typed outcomes under `StoreOpenError`; none reads as empty. On a store the vault owns, corrupt or another identity rebuilds into a fresh generation (a model change re-embeds, as documented); a process that does not own the files refuses (#1766, #1777). | An unreachable or unknown store rebuilt as empty is how a server overwrites another process's index; the type says what the operator can do about it. |
 | 32 | Numpy store persistence | JSON commit point naming a per-persist matrix; in-memory publish with durability at checkpoint; `publish_generation` durable at once (#1767). | Crash-safe two-file commit without rewriting the whole matrix per document; write amplification is #1497's. |
