@@ -33,6 +33,13 @@ Dict with the following fields:
 - `chunk_count` (int): Number of chunks currently in the vector index.
 - path (str | None): Vector index file path when persisted, or
   null when the vectors are held in memory or not configured.
+- backend (str | None): Name of the store holding the vectors
+  (such as `"numpy"`), or null if no provider is configured.
+- identity (dict | None): The provider, model, variant, text
+  format and dimension the stored vectors were embedded with,
+  or null until the store is first opened.
+- generation (int | None): Count of full rebuilds the store has
+  published, or null until the store is first opened.
 
 <!-- DOMAIN-EXAMPLE-embeddings_status-START -->
 <!-- A worked example for this tool; kept across regeneration. -->
