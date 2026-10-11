@@ -155,12 +155,20 @@ def _commit_file(path: Path, data: bytes) -> None:
     _write_atomic(path, lambda fh: fh.write(data))
 
 
+def _numbered_matrices(base: Path) -> dict[int, Path]:
+    """Return the ``{base}.m{seq}.npy`` matrices beside *base*, by ``seq``."""
+    prefix, suffix = base.with_suffix(".m").name, ".npy"
+    found: dict[int, Path] = {}
+    for path in base.parent.glob(f"{prefix}*{suffix}"):
+        seq = path.name[len(prefix) : -len(suffix)]
+        if seq.isdigit():
+            found[int(seq)] = path
+    return found
+
+
 def _sweep(base: Path, keep: Path) -> None:
     """Remove every matrix beside *base* except *keep*: superseded or orphaned."""
-    stale = [
-        base.with_suffix(".npy"),
-        *base.parent.glob(base.with_suffix(".m*.npy").name),
-    ]
+    stale = [base.with_suffix(".npy"), *_numbered_matrices(base).values()]
     for path in stale:
         if path == keep:
             continue
@@ -172,13 +180,7 @@ def _sweep(base: Path, keep: Path) -> None:
 
 def _highest_seq(base: Path) -> int:
     """Return the highest ``m{seq}`` matrix number beside *base*, 0 if none."""
-    prefix, suffix = base.with_suffix(".m").name, ".npy"
-    seqs = [
-        int(p.name[len(prefix) : -len(suffix)])
-        for p in base.parent.glob(base.with_suffix(".m*.npy").name)
-        if p.name[len(prefix) : -len(suffix)].isdigit()
-    ]
-    return max(seqs, default=0)
+    return max(_numbered_matrices(base), default=0)
 
 
 def _payload(snap: _Snapshot, matrix_name: str, seq: int) -> bytes:

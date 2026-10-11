@@ -608,3 +608,14 @@ class TestSweep:
             "idx-embeddings.json",
             "idx-embeddings.m8.npy",
         ]
+
+    def test_a_persist_leaves_a_file_that_only_looks_like_a_matrix(
+        self, tmp_path: Path
+    ) -> None:
+        base = _base(tmp_path)
+        base.parent.mkdir(parents=True)
+        (base.parent / "idx-embeddings.mine.npy").write_bytes(b"not ours")
+        store = NumpySidecarBackend().open_fresh(base, IDENT)
+        store.replace_document(doc("a.md", [[1, 0, 0]]), expected_token=ANY_TOKEN)
+        store.close()
+        assert (base.parent / "idx-embeddings.mine.npy").read_bytes() == b"not ours"
