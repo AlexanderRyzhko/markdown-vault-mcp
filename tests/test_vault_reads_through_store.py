@@ -259,3 +259,21 @@ class TestProviderDown:
             assert {r.path for r in similar} == {"beta.md", "gamma.md"}
         finally:
             vault.close()
+
+
+class TestASearchBeforeTheFirstBuild:
+    def test_the_build_after_it_still_embeds(self, tmp_path: Path) -> None:
+        vault = Vault(
+            source_dir=_vault_dir(tmp_path),
+            settings=_settings(tmp_path),
+            embedding_provider=MockEmbeddingProvider(),
+        )
+        try:
+            vault.index.build_index()
+            vault.reader.search("Apples and pears.", limit=1, mode="hybrid")
+            vault.index.build_embeddings()
+            results = vault.reader.search("Apples and pears.", limit=1, mode="semantic")
+            assert [r.path for r in results] == ["alpha.md"]
+            assert vault.index.embeddings_status()["identity"]["dimension"] == 32
+        finally:
+            vault.close()

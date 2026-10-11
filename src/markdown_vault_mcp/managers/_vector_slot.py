@@ -123,6 +123,10 @@ class VectorStoreSlot:
     def get(self, *, rebuild: Callable[[], object] | None) -> EmbeddingStore:
         """Return the store, opening it on first use.
 
+        A store that opens with nothing stored and no known dimension is
+        returned but not installed, so the writer's :meth:`legacy_get` still
+        sets the provider's dimension.
+
         Args:
             rebuild: Rebuilds an owned store that is corrupt or holds another
                 identity, installing the result (through :meth:`fresh`);
@@ -155,6 +159,11 @@ class VectorStoreSlot:
                     "Failed to rebuild the vector store after it would not open."
                 ) from exc
             return self._store
+        if store.identity.dimension == 0:
+            # Nothing is stored and the dimension is not known: let the read
+            # search the empty store, but install nothing, so the writer
+            # opens through legacy_get, which learns the provider's dimension.
+            return store
         self._store = store
         return store
 
