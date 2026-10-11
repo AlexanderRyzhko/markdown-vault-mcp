@@ -122,3 +122,40 @@ class TestRegistry:
         from markdown_vault_mcp.stores.registry import backend_names
 
         assert "sqlite" not in backend_names("vector")
+
+
+class TestVectorValueTypes:
+    def test_identity_of_a_provider(self) -> None:
+        from markdown_vault_mcp.types import EmbeddingIdentity
+        from tests.conftest import MockEmbeddingProvider
+
+        identity = EmbeddingIdentity.of(MockEmbeddingProvider(dim=3), "v1")
+        assert identity == EmbeddingIdentity(
+            provider="mock",
+            model="mock-dim-3",
+            variant="",
+            text_format="v1",
+            dimension=3,
+        )
+
+    def test_document_rows_keep_rows_as_a_tuple(self) -> None:
+        from markdown_vault_mcp.types import DocumentRows, VectorRow
+
+        rows = [VectorRow(vector=[1.0], metadata={"path": "a.md"})]
+        doc = DocumentRows(path="a.md", token="t", rows=rows)
+        rows.append(VectorRow(vector=[2.0], metadata={}))
+        assert len(doc.rows) == 1
+
+    def test_a_row_naming_another_path_is_refused(self) -> None:
+        from markdown_vault_mcp.types import DocumentRows, VectorRow
+
+        rows = [VectorRow(vector=[1.0], metadata={"path": "b.md"})]
+        with pytest.raises(ValueError, match=r"b\.md"):
+            DocumentRows(path="a.md", token=None, rows=rows)
+
+    def test_any_token_is_a_singleton_distinct_from_none(self) -> None:
+        from markdown_vault_mcp.types import ANY_TOKEN, _AnyToken
+
+        assert _AnyToken() is ANY_TOKEN
+        assert ANY_TOKEN is not None
+        assert repr(ANY_TOKEN) == "ANY_TOKEN"
