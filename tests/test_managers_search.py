@@ -674,7 +674,6 @@ def search_mgr_with_embeddings(search_vault: Path) -> SearchManager:
         embedding_provider=provider,
         indexed_frontmatter_fields=["tags"],
     )
-    mgr._vectors = vectors
     return mgr
 
 
@@ -859,7 +858,6 @@ def _semantic_mgr_with_ranked_chunks(base: Path) -> SearchManager:
         embedding_provider=provider,
         indexed_frontmatter_fields=[],
     )
-    mgr._vectors = vi
     return mgr
 
 
@@ -982,7 +980,6 @@ def buried_folder_mgr(
         embeddings_path=embeddings_path,
         embedding_provider=provider,
     )
-    mgr._vectors = vectors
     return mgr
 
 
@@ -1042,13 +1039,12 @@ def test_folder_scoped_get_similar_keeps_room_for_other_files(
         }
     )
 
-    def fake_search_by_path(_path, *, limit, predicate=None):
+    def fake_similar(_path, *, limit, predicate=None):
         eligible = [r for r in ranking if predicate is None or predicate(r)]
         return [dict(r) for r in eligible[:limit]]
 
-    monkeypatch.setattr(
-        search_mgr_with_embeddings._vectors, "search_by_path", fake_search_by_path
-    )
+    store = search_mgr_with_embeddings._load_vectors()
+    monkeypatch.setattr(store, "similar_to_document", fake_similar)
 
     results = search_mgr_with_embeddings.get_similar(
         "alpha.md", folder="notes", limit=2, chunks_per_file=1
@@ -1306,7 +1302,7 @@ def test_hybrid_search_search_type_is_group_union_not_head(
         },
     ]
 
-    def fake_vec_search(_query, *, limit, predicate=None):  # noqa: ARG001
+    def fake_vec_search(_vector, *, limit, predicate=None, folder=None):  # noqa: ARG001
         return list(fake_vec_rows)
 
     monkeypatch.setattr(vectors, "search", fake_vec_search)
@@ -1418,6 +1414,26 @@ class TestSearchLoadVectorsSelfHeal:
         json_path.write_text(json.dumps(payload), encoding="utf-8")
 
     @staticmethod
+    def _rebuilt_store(mgr: SearchManager) -> object:
+        """A store holding one row, as the coordinator's rebuild would install."""
+        from markdown_vault_mcp.stores.numpy_sidecar import NumpySidecarBackend
+        from markdown_vault_mcp.types import (
+            ANY_TOKEN,
+            DocumentRows,
+            EmbeddingIdentity,
+            VectorRow,
+        )
+
+        provider = mgr._embedding_provider
+        assert provider is not None
+        store = NumpySidecarBackend().open(None, EmbeddingIdentity.of(provider, "v1"))
+        row = VectorRow(provider.embed(["alpha"])[0], {"path": "a.md", "title": "A"})
+        store.replace_document(
+            DocumentRows("a.md", None, [row]), expected_token=ANY_TOKEN
+        )
+        return store
+
+    @staticmethod
     def _arm_rebuild(mgr: SearchManager) -> None:
         """Wire a rebuild callback that repopulates the shared slot, then drop cache.
 
@@ -1425,13 +1441,10 @@ class TestSearchLoadVectorsSelfHeal:
         ``mgr.vectors`` to a populated index — so the self-heal path returns a
         usable index rather than tripping the rebuild-failure guard.
         """
-        from markdown_vault_mcp.vector_index import VectorIndex
-
         assert mgr._embedding_provider is not None
-        rebuilt = VectorIndex(mgr._embedding_provider)
-        rebuilt.add(["alpha"], [{"path": "a.md", "title": "A", "heading": None}])
+        rebuilt = TestSearchLoadVectorsSelfHeal._rebuilt_store(mgr)
         mgr._rebuild_embeddings = lambda: setattr(mgr, "vectors", rebuilt)
-        mgr._vectors = None  # force a re-read from disk
+        mgr.vectors = None  # force a re-read from disk
 
     def test_corrupt_sidecar_triggers_rebuild(
         self,
@@ -1441,16 +1454,13 @@ class TestSearchLoadVectorsSelfHeal:
         """A count-mismatched sidecar routes to the rebuild callback, not a crash."""
         import logging
 
-        from markdown_vault_mcp.vector_index import VectorIndex
-
         mgr = search_mgr_with_embeddings
         self._corrupt_json_drop_row(mgr)
-        mgr._vectors = None  # force a re-read from disk
+        mgr.vectors = None  # force a re-read from disk
 
         # Mirror what the coordinator's rebuild does: repopulate the shared slot.
         assert mgr._embedding_provider is not None
-        rebuilt = VectorIndex(mgr._embedding_provider)
-        rebuilt.add(["alpha"], [{"path": "a.md", "title": "A", "heading": None}])
+        rebuilt = TestSearchLoadVectorsSelfHeal._rebuilt_store(mgr)
 
         def rebuild() -> None:
             mgr.vectors = rebuilt
@@ -1458,13 +1468,13 @@ class TestSearchLoadVectorsSelfHeal:
         mgr._rebuild_embeddings = rebuild
 
         with caplog.at_level(
-            logging.WARNING, logger="markdown_vault_mcp.managers.search"
+            logging.WARNING, logger="markdown_vault_mcp.managers._vector_slot"
         ):
             result = mgr._load_vectors()
 
         assert result is rebuilt
         assert any(
-            "vector_index_corrupt_rebuilding" in r.getMessage() for r in caplog.records
+            "vector_store_rebuild_started" in r.getMessage() for r in caplog.records
         )
 
     def test_corrupt_sidecar_rebuild_failure_raises(
@@ -1473,12 +1483,10 @@ class TestSearchLoadVectorsSelfHeal:
         """If the rebuild leaves no index, a corrupt sidecar surfaces a ValueError."""
         mgr = search_mgr_with_embeddings
         self._corrupt_json_drop_row(mgr)
-        mgr._vectors = None
-        mgr._rebuild_embeddings = lambda: None  # no-op leaves _vectors None
+        mgr.vectors = None
+        mgr._rebuild_embeddings = lambda: None  # no-op installs no store
 
-        with pytest.raises(
-            ValueError, match="Failed to rebuild vector index after a corrupt sidecar"
-        ):
+        with pytest.raises(ValueError, match="Failed to rebuild the vector store"):
             mgr._load_vectors()
 
     def test_zero_byte_npy_triggers_rebuild(
@@ -1499,13 +1507,13 @@ class TestSearchLoadVectorsSelfHeal:
         self._arm_rebuild(mgr)
 
         with caplog.at_level(
-            logging.WARNING, logger="markdown_vault_mcp.managers.search"
+            logging.WARNING, logger="markdown_vault_mcp.managers._vector_slot"
         ):
             result = mgr._load_vectors()
 
         assert result.count >= 1
         assert any(
-            "vector_index_corrupt_rebuilding" in r.getMessage() for r in caplog.records
+            "vector_store_rebuild_started" in r.getMessage() for r in caplog.records
         )
 
     def test_garbage_npy_triggers_rebuild(
@@ -1522,13 +1530,13 @@ class TestSearchLoadVectorsSelfHeal:
         self._arm_rebuild(mgr)
 
         with caplog.at_level(
-            logging.WARNING, logger="markdown_vault_mcp.managers.search"
+            logging.WARNING, logger="markdown_vault_mcp.managers._vector_slot"
         ):
             result = mgr._load_vectors()
 
         assert result.count >= 1
         assert any(
-            "vector_index_corrupt_rebuilding" in r.getMessage() for r in caplog.records
+            "vector_store_rebuild_started" in r.getMessage() for r in caplog.records
         )
 
     def test_missing_json_with_present_npy_triggers_rebuild(
@@ -1544,13 +1552,13 @@ class TestSearchLoadVectorsSelfHeal:
         self._arm_rebuild(mgr)
 
         with caplog.at_level(
-            logging.WARNING, logger="markdown_vault_mcp.managers.search"
+            logging.WARNING, logger="markdown_vault_mcp.managers._vector_slot"
         ):
             result = mgr._load_vectors()
 
         assert result.count >= 1
         assert any(
-            "vector_index_corrupt_rebuilding" in r.getMessage() for r in caplog.records
+            "vector_store_rebuild_started" in r.getMessage() for r in caplog.records
         )
 
     def test_permission_error_propagates_without_rebuild(
@@ -1565,19 +1573,20 @@ class TestSearchLoadVectorsSelfHeal:
         SearchManager path too (parity with IndexManager), so a future widening
         to OSError cannot silently slip through here.
         """
-        from markdown_vault_mcp.vector_index import VectorIndex
-
         mgr = search_mgr_with_embeddings
-        mgr._vectors = None
+        mgr.vectors = None
 
-        def boom(*_args: object, **_kwargs: object) -> VectorIndex:
-            raise PermissionError("read denied")
+        def boom(*_args: object, **_kwargs: object) -> object:
+            raise StoreUnavailableError("read denied", backend="numpy", location="x")
 
-        monkeypatch.setattr(VectorIndex, "load", boom)
+        from markdown_vault_mcp.exceptions import StoreUnavailableError
+        from markdown_vault_mcp.stores.numpy_sidecar import NumpySidecarBackend
+
+        monkeypatch.setattr(NumpySidecarBackend, "open", boom)
         rebuild_calls: list[bool] = []
         mgr._rebuild_embeddings = lambda: rebuild_calls.append(True)
 
-        with pytest.raises(PermissionError, match="read denied"):
+        with pytest.raises(StoreUnavailableError, match="read denied"):
             mgr._load_vectors()
         assert rebuild_calls == []  # no rebuild attempted
 
@@ -1702,7 +1711,6 @@ def _boost_mgr(boost_vault: Path, **mgr_kwargs) -> SearchManager:
         embedding_provider=provider,
         **mgr_kwargs,
     )
-    mgr.vectors = vectors
     return mgr
 
 
@@ -1784,7 +1792,7 @@ def test_blank_query_returns_empty_without_reaching_provider(
     provider through its own vector-channel call site — takes the same path
     as semantic.
     """
-    search_mgr_with_embeddings._vectors._provider = _RejectsBlankProvider()  # type: ignore[assignment]
+    search_mgr_with_embeddings._embedding_provider = _RejectsBlankProvider()  # type: ignore[assignment]
 
     assert search_mgr_with_embeddings.search(query, mode=mode) == []  # type: ignore[arg-type]
 
@@ -1801,17 +1809,6 @@ def test_blank_query_still_raises_when_embeddings_unconfigured(
 
     with pytest.raises(EmbeddingsNotConfiguredError):
         search_mgr.search("", mode="semantic")
-
-
-def test_vector_index_blank_query_returns_empty(
-    search_mgr_with_embeddings: SearchManager,
-) -> None:
-    """VectorIndex.search backstops a direct library consumer (#1111)."""
-    vectors = search_mgr_with_embeddings._vectors
-    assert vectors is not None
-    vectors._provider = _RejectsBlankProvider()  # type: ignore[assignment]
-
-    assert vectors.search("   ", limit=5) == []
 
 
 def _mgr(vault_dir: Path, *, default_mode: str) -> SearchManager:

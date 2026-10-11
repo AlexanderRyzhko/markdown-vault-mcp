@@ -2015,7 +2015,7 @@ def test_start_line_propagated_to_vector_metadata(tmp_path):
 
     # Inspect the underlying VectorIndex metadata directly.
     assert col._vectors is not None
-    metas = col._vectors._metadata
+    metas = [m for rows in col._vectors.chunks_by_path().values() for m in rows]
     assert metas, "vector index should have rows for the test note"
     assert all("start_line" in m for m in metas), (
         f"every metadata row must carry start_line; got keys {set(metas[0])}"

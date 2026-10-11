@@ -317,9 +317,9 @@ def _unusable_vectors_message(exc: VectorIndexUnusableError) -> str:
     Returns:
         The ``ERROR:`` line for stderr.
     """
-    from markdown_vault_mcp.vector_index import VectorIndexCompatibilityError
+    from markdown_vault_mcp.exceptions import StoreIncompatibleError
 
-    if isinstance(exc.__cause__, VectorIndexCompatibilityError):
+    if isinstance(exc.__cause__, StoreIncompatibleError):
         remedy = "Search with the embedding settings that built them"
     else:
         remedy = (
