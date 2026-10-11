@@ -29,6 +29,28 @@ A backend carries its own configuration; `open()` takes only the location and wh
 ::: markdown_vault_mcp.stores.sqlite_keyword.SqliteKeywordBackend
 <!-- vale on -->
 
+## Vector stores
+
+A vector store takes query vectors, not text: the caller embeds. Publication is conditional on the token the caller saw; `ANY_TOKEN` skips the comparison.
+
+<!-- vale off -->
+::: markdown_vault_mcp.interfaces.VectorReader
+
+::: markdown_vault_mcp.interfaces.VectorPublisher
+
+::: markdown_vault_mcp.interfaces.EmbeddingStore
+
+::: markdown_vault_mcp.types.EmbeddingIdentity
+
+::: markdown_vault_mcp.types.VectorRow
+
+::: markdown_vault_mcp.types.DocumentRows
+
+::: markdown_vault_mcp.stores.numpy_sidecar.NumpySidecarBackend
+
+::: markdown_vault_mcp.stores.numpy_sidecar.NumpySidecarStore
+<!-- vale on -->
+
 ## Lifecycle
 
 <!-- vale off -->
