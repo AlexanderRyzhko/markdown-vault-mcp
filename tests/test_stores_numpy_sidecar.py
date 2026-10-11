@@ -536,3 +536,75 @@ class TestReaderRacesWriter:
         monkeypatch.setattr(numpy_sidecar, "_read_json", stale_then_fresh)
         reader = NumpySidecarBackend().open(base, IDENT, owns_files=False)
         assert set(reader.tokens()) == {"a.md", "b.md"}
+
+
+class TestOpenFresh:
+    def test_satisfies_vector_backend(self) -> None:
+        from markdown_vault_mcp.interfaces import VectorBackend
+
+        assert isinstance(NumpySidecarBackend(), VectorBackend)
+
+    def test_a_fresh_store_ignores_what_is_there_until_it_persists(
+        self, tmp_path: Path
+    ) -> None:
+        base = _base(tmp_path)
+        old = NumpySidecarBackend().open(base, IDENT)
+        old.replace_document(doc("old.md", [[1, 0, 0]]), expected_token=ANY_TOKEN)
+        old.close()
+        other = EmbeddingIdentity("fake", "m2", "", "v1", 2)
+        fresh = NumpySidecarBackend().open_fresh(base, other)
+        assert (fresh.count, fresh.identity) == (0, other)
+        # Until the fresh store persists, the old files are what a reader opens.
+        assert NumpySidecarBackend().open(base, IDENT, owns_files=False).count == 1
+        fresh.replace_document(doc("new.md", [[1, 0]]), expected_token=ANY_TOKEN)
+        fresh.close()
+        assert NumpySidecarBackend().open(base, other).tokens() == {"new.md": "t1"}
+
+    def test_a_fresh_store_over_corrupt_files_replaces_them(
+        self, tmp_path: Path
+    ) -> None:
+        base = _base(tmp_path)
+        base.parent.mkdir(parents=True)
+        base.with_suffix(".json").write_text("{not json")
+        fresh = NumpySidecarBackend().open_fresh(base, IDENT)
+        fresh.replace_document(doc("a.md", [[1, 0, 0]]), expected_token=ANY_TOKEN)
+        fresh.close()
+        assert NumpySidecarBackend().open(base, IDENT).count == 1
+
+    def test_a_fresh_store_does_not_reuse_an_existing_matrix_name(
+        self, tmp_path: Path
+    ) -> None:
+        base = _base(tmp_path)
+        old = NumpySidecarBackend().open(base, IDENT)
+        old.replace_document(doc("old.md", [[1, 0, 0]]), expected_token=ANY_TOKEN)
+        old.checkpoint()
+        old.replace_document(doc("old2.md", [[0, 1, 0]]), expected_token=ANY_TOKEN)
+        old.close()  # m2 is current
+        fresh = NumpySidecarBackend().open_fresh(base, IDENT)
+        fresh.replace_document(doc("new.md", [[0, 0, 1]]), expected_token=ANY_TOKEN)
+        fresh.close()
+        assert sorted(p.name for p in base.parent.iterdir()) == [
+            "idx-embeddings.json",
+            "idx-embeddings.m3.npy",
+        ]
+
+    def test_in_memory_fresh(self) -> None:
+        store = NumpySidecarBackend().open_fresh(None, IDENT)
+        assert store.count == 0
+
+
+class TestSweep:
+    def test_a_persist_removes_the_legacy_matrix_and_orphans(
+        self, tmp_path: Path
+    ) -> None:
+        base = _base(tmp_path)
+        base.parent.mkdir(parents=True)
+        for name in ("idx-embeddings.npy", "idx-embeddings.m7.npy"):
+            np.save(base.parent / name, np.zeros((0, 3), dtype=np.float32))
+        store = NumpySidecarBackend().open_fresh(base, IDENT)
+        store.replace_document(doc("a.md", [[1, 0, 0]]), expected_token=ANY_TOKEN)
+        store.close()
+        assert sorted(p.name for p in base.parent.iterdir()) == [
+            "idx-embeddings.json",
+            "idx-embeddings.m8.npy",
+        ]

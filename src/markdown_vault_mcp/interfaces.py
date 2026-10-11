@@ -67,6 +67,7 @@ __all__ = [
     "SourceProbe",
     "StoreBackend",
     "StoreLifecycle",
+    "VectorBackend",
     "VectorPublisher",
     "VectorReader",
     "VectorStore",
@@ -600,3 +601,20 @@ class VectorPublisher(Protocol):
 @runtime_checkable
 class EmbeddingStore(VectorReader, VectorPublisher, StoreLifecycle, Protocol):
     """What a vector backend opens: read, publish and close (#1767)."""
+
+
+@runtime_checkable
+class VectorBackend(StoreBackend[EmbeddingStore], Protocol):
+    """A backend that opens vector stores, including a fresh one (#1777)."""
+
+    def open_fresh(
+        self, location: Path | str | None, identity: EmbeddingIdentity
+    ) -> EmbeddingStore:
+        """Open *location* as an empty store at *identity*, reading nothing there.
+
+        What the location holds stays in place until the fresh store's first
+        persist replaces it, so a rebuild that never completes leaves the
+        previous data for the next open. Used to rebuild a store that would
+        not open (corrupt) or holds another identity.
+        """
+        ...
