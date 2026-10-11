@@ -222,7 +222,8 @@ class TestLegacyVectorWrites:
         slot.replace_any(first)
         assert slot.legacy() is first
         fresh = slot.legacy_fresh()
-        assert fresh is not first and slot.legacy() is fresh
+        assert fresh is not first
+        assert slot.legacy() is fresh
 
 
 class TestDimensionOnTheWritePath:
@@ -288,3 +289,29 @@ class TestDimensionOnTheWritePath:
         )
         with pytest.raises(VectorIndexUnusableError, match="dimension"):
             slot.legacy_get(rebuild=None)
+
+    def test_an_empty_injected_store_takes_the_provider_dimension(self) -> None:
+        injected = NumpySidecarBackend().open(
+            None, EmbeddingIdentity("mock", "mock-dim-3", "", "v1", 0)
+        )
+        slot = _slot(None, store=injected)
+        writes = slot.legacy_get(rebuild=None)
+        assert writes.store is injected
+        assert injected.identity.dimension == 3
+
+    def test_a_populated_injected_store_of_another_dimension_is_refused(
+        self,
+    ) -> None:
+        stored = EmbeddingIdentity("mock", "same-name", "", "v1", 3)
+        injected = NumpySidecarBackend().open(None, stored)
+        injected.replace_document(doc("a.md", [[1, 0, 0]]), expected_token=ANY_TOKEN)
+        slot = VectorStoreSlot(
+            backend=NumpySidecarBackend(),
+            location=None,
+            provider=self._SameNameProvider(dim=4),
+            text_format="v1",
+            store=injected,
+        )
+        with pytest.raises(VectorIndexUnusableError, match="dimension"):
+            slot.legacy_get(rebuild=lambda: pytest.fail("rebuilt"))
+        assert injected.count == 1

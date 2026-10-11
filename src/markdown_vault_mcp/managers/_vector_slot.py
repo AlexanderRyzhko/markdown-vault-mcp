@@ -30,10 +30,30 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from markdown_vault_mcp.interfaces import EmbeddingStore, VectorBackend
+    from markdown_vault_mcp.interfaces import (
+        EmbeddingStore,
+        VectorBackend,
+        VectorStore,
+    )
     from markdown_vault_mcp.providers import EmbeddingProvider
 
 logger = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass(frozen=True)
+class VectorStoreAccess:
+    """The vault's store as the embeddings writer reaches it, until #1778.
+
+    Attributes:
+        open: Opens the store for writing, rebuilding an owned one that will
+            not open.
+        fresh: Installs an empty store to rebuild into.
+        describe: Backend, identity and generation for ``embeddings_status``.
+    """
+
+    open: Callable[[], VectorStore]
+    fresh: Callable[[], VectorStore]
+    describe: Callable[[], dict[str, Any]]
 
 
 class VectorStoreSlot:
@@ -201,9 +221,10 @@ class VectorStoreSlot:
         """Open (installing) and return the adapter over the store, for writing.
 
         Writing needs the provider, so here its dimension is checked against
-        the store's: an empty store is replaced by a fresh one at the full
-        identity; a populated one of another dimension is rebuilt, or refused
-        without ``rebuild``.
+        the store's: an empty store takes the full identity (an owned one is
+        replaced by a fresh one, an injected one is emptied in place, losing
+        nothing); a populated one of another dimension is rebuilt, or refused
+        without ``rebuild`` or when injected.
 
         Raises:
             VectorIndexUnusableError: If the store holds another dimension
@@ -211,7 +232,7 @@ class VectorStoreSlot:
         """
         store = self.get(rebuild=rebuild)
         if store.identity.dimension != self.identity.dimension:
-            if store.count == 0 and not self._injected:
+            if store.count == 0:
                 self.fresh()
             elif rebuild is None or self._injected:
                 raise VectorIndexUnusableError(

@@ -42,7 +42,7 @@ from markdown_vault_mcp.facets import (
 )
 from markdown_vault_mcp.indexing import IndexWriteCoordinator
 from markdown_vault_mcp.indexing.head_reconciler import IndexHeadReconciler
-from markdown_vault_mcp.managers._vector_slot import VectorStoreSlot
+from markdown_vault_mcp.managers._vector_slot import VectorStoreAccess, VectorStoreSlot
 from markdown_vault_mcp.okf import (
     OkfAuditReport,
     OkfDetector,
@@ -497,15 +497,17 @@ class Vault:
             # only accessed at call-time, not during IndexManager.__init__.
             get_vectors=lambda: self._vector_slot.legacy(),
             set_vectors=lambda v: self._vector_slot.replace_any(v),
-            open_vectors=lambda: self._vector_slot.legacy_get(
-                rebuild=(
-                    (lambda: self._index_mgr.build_embeddings(force=True))
-                    if settings.owns_index_files
-                    else None
-                )
+            store_access=VectorStoreAccess(
+                open=lambda: self._vector_slot.legacy_get(
+                    rebuild=(
+                        (lambda: self._index_mgr.build_embeddings(force=True))
+                        if settings.owns_index_files
+                        else None
+                    )
+                ),
+                fresh=lambda: self._vector_slot.legacy_fresh(),
+                describe=self._vector_slot.describe,
             ),
-            fresh_vectors=lambda: self._vector_slot.legacy_fresh(),
-            describe_store=self._vector_slot.describe,
             embed_model_name=self._embed_model_name,
             max_chunk_chars_override=self._max_chunk_chars_override,
             title_field=self._title_field,

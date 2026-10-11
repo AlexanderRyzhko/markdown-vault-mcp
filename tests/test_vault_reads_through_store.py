@@ -189,12 +189,9 @@ class TestInjection:
     ) -> None:
         settings = _settings(tmp_path, embedding_store="milvus")
         source = _vault_dir(tmp_path)
+        provider = MockEmbeddingProvider()
         with pytest.raises(ConfigurationError, match="milvus"):
-            Vault(
-                source_dir=source,
-                settings=settings,
-                embedding_provider=MockEmbeddingProvider(),
-            )
+            Vault(source_dir=source, settings=settings, embedding_provider=provider)
 
 
 class TestInMemory:

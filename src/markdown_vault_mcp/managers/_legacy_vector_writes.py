@@ -122,6 +122,6 @@ class LegacyVectorWrites:
         self._store.remove_document(path, expected_token=ANY_TOKEN)
         return removed
 
-    def save(self, path: Path) -> None:  # noqa: ARG002 - the store knows its location
-        """Make the store durable; *path* is ignored."""
+    def save(self, _path: Path) -> None:
+        """Make the store durable; the path is ignored, the store knows its own."""
         self._store.checkpoint()
