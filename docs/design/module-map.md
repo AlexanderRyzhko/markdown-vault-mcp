@@ -26,6 +26,8 @@ src/markdown_vault_mcp/
     fs.py              -- filesystem traversal helpers: symlink-aware iteration, directory pruning (#508, #835)
     fts.py             -- fts_row_to_note_info: FTS row → NoteInfo conversion shared across managers
   managers/
+    _vector_slot.py    -- VectorStoreSlot: the vault's one vector store, opened lazily through a VectorBackend, rebuilt when owned and corrupt or of another identity, closed when the vault opened it (#1777)
+    _legacy_vector_writes.py -- LegacyVectorWrites: the released VectorStore calls on an EmbeddingStore, for the write paths until #1778 deletes it (#1777)
     __init__.py        -- package aggregator: re-exports DocumentManager/IndexManager/LinkManager/SearchManager
     link.py            -- LinkManager: backlinks, outlinks, broken, orphans, hubs, paths
     link_report.py     -- UnresolvedLinkReporter: the unresolved links one write/edit/append added, read back from the index rows get_broken_links uses (#1725); internal collaborator, not re-exported
