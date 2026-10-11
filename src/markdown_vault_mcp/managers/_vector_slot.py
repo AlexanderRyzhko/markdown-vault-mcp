@@ -96,6 +96,26 @@ class VectorStoreSlot:
             self._identity = EmbeddingIdentity.of(self._provider, self._text_format)
         return self._identity
 
+    def _open_identity(self) -> EmbeddingIdentity:
+        """The identity to open with, without asking the provider for its dimension.
+
+        Provider, model, variant and format come from configuration; the
+        dimension may need a network probe, so a stored store supplies it
+        (``0`` = take the stored one). In memory nothing is stored, and only
+        the writer opens it, which needs the provider anyway.
+        """
+        if self._identity is not None or self._location is None:
+            return self.identity
+        if self._provider is None:
+            raise RuntimeError("A vector store needs an embedding provider.")
+        return EmbeddingIdentity(
+            provider=self._provider.provider_name,
+            model=self._provider.model_name,
+            variant=self._provider.provider_variant,
+            text_format=self._text_format,
+            dimension=0,
+        )
+
     def current(self) -> EmbeddingStore | None:
         """Return the installed store, opening nothing."""
         return self._store
@@ -119,7 +139,7 @@ class VectorStoreSlot:
             return self._store
         try:
             store = self._backend.open(
-                self._location, self.identity, owns_files=self._owns_files
+                self._location, self._open_identity(), owns_files=self._owns_files
             )
         except (StoreCorruptError, StoreIncompatibleError) as exc:
             if rebuild is None:
@@ -169,8 +189,33 @@ class VectorStoreSlot:
         return self._legacy
 
     def legacy_get(self, *, rebuild: Callable[[], object] | None) -> LegacyVectorWrites:
-        """Open (installing) and return the adapter over the store."""
-        self.get(rebuild=rebuild)
+        """Open (installing) and return the adapter over the store, for writing.
+
+        Writing needs the provider, so here its dimension is checked against
+        the store's: an empty store is replaced by a fresh one at the full
+        identity; a populated one of another dimension is rebuilt, or refused
+        without ``rebuild``.
+
+        Raises:
+            VectorIndexUnusableError: If the store holds another dimension
+                and no rebuild is allowed.
+        """
+        store = self.get(rebuild=rebuild)
+        if store.identity.dimension != self.identity.dimension:
+            if store.count == 0 and not self._injected:
+                self.fresh()
+            elif rebuild is None or self._injected:
+                raise VectorIndexUnusableError(
+                    f"The vector store holds dimension {store.identity.dimension}; "
+                    f"the provider embeds {self.identity.dimension}."
+                )
+            else:
+                logger.warning(
+                    "vector_store_rebuild_started location=%s reason=%s",
+                    self._location,
+                    "dimension",
+                )
+                rebuild()
         adapter = self.legacy()
         if adapter is None:  # pragma: no cover - get() installed a store
             raise RuntimeError("The vector store did not install.")

@@ -1162,7 +1162,9 @@ class EmbeddingIdentity:
             most providers.
         text_format: The embedding-text format token
             (``EmbedTextBuilder.format_token()``).
-        dimension: Floats per vector.
+        dimension: Floats per vector; ``0`` when not known yet, in which
+            case a store opened against the identity takes the dimension
+            it has stored (and refuses writes until it knows one).
     """
 
     provider: str

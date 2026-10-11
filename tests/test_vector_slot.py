@@ -126,7 +126,9 @@ class TestInjectedStore:
 class TestLifecycleAndDescription:
     def test_close_closes_what_the_slot_opened(self, tmp_path: Path) -> None:
         slot = _slot(tmp_path / "vec")
-        store = slot.get(rebuild=None)
+        store = slot.legacy_get(
+            rebuild=None
+        ).store  # the writer's open fixes the dimension
         store.replace_document(doc("a.md", [[1, 0, 0]]), expected_token=ANY_TOKEN)
         slot.close()
         with pytest.raises(RuntimeError, match="closed"):
@@ -140,7 +142,7 @@ class TestLifecycleAndDescription:
             "identity": None,
             "generation": None,
         }
-        slot.get(rebuild=None)
+        slot.legacy_get(rebuild=None)
         assert slot.describe() == {
             "backend": "numpy",
             "identity": {
@@ -221,3 +223,68 @@ class TestLegacyVectorWrites:
         assert slot.legacy() is first
         fresh = slot.legacy_fresh()
         assert fresh is not first and slot.legacy() is fresh
+
+
+class TestDimensionOnTheWritePath:
+    class _SameNameProvider(MockEmbeddingProvider):
+        @property
+        def model_name(self) -> str:
+            return "same-name"
+
+    def test_reads_open_without_asking_the_provider_for_its_dimension(
+        self, tmp_path: Path
+    ) -> None:
+        stored = EmbeddingIdentity("mock", "same-name", "", "v1", 3)
+        _persist_with(tmp_path / "vec", stored)
+
+        class Down(self._SameNameProvider):
+            @property
+            def dimension(self) -> int:
+                raise ConnectionError("down")
+
+        slot = VectorStoreSlot(
+            backend=NumpySidecarBackend(),
+            location=tmp_path / "vec",
+            provider=Down(dim=3),
+            text_format="v1",
+        )
+        store = slot.get(rebuild=None)
+        assert (store.count, store.identity.dimension) == (1, 3)
+
+    def test_a_dimension_change_under_the_same_model_rebuilds_before_writing(
+        self, tmp_path: Path
+    ) -> None:
+        _persist_with(
+            tmp_path / "vec", EmbeddingIdentity("mock", "same-name", "", "v1", 3)
+        )
+        slot = VectorStoreSlot(
+            backend=NumpySidecarBackend(),
+            location=tmp_path / "vec",
+            provider=self._SameNameProvider(dim=4),
+            text_format="v1",
+        )
+        rebuilt: list[int] = []
+
+        def rebuild() -> None:
+            rebuilt.append(1)
+            slot.fresh()
+
+        writes = slot.legacy_get(rebuild=rebuild)
+        assert rebuilt == [1]
+        assert writes.store.identity.dimension == 4
+
+    def test_without_ownership_a_dimension_change_is_unusable_for_writes(
+        self, tmp_path: Path
+    ) -> None:
+        _persist_with(
+            tmp_path / "vec", EmbeddingIdentity("mock", "same-name", "", "v1", 3)
+        )
+        slot = VectorStoreSlot(
+            backend=NumpySidecarBackend(),
+            location=tmp_path / "vec",
+            provider=self._SameNameProvider(dim=4),
+            text_format="v1",
+            owns_files=False,
+        )
+        with pytest.raises(VectorIndexUnusableError, match="dimension"):
+            slot.legacy_get(rebuild=None)

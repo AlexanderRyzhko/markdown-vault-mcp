@@ -30,7 +30,7 @@ import logging
 import os
 import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import IO, TYPE_CHECKING, Any
@@ -669,7 +669,8 @@ def _check_identity(
     dimension = stored.dimension or (
         matrix.shape[1] if matrix.ndim == 2 and matrix.shape[0] else 0
     )
-    if dimension and dimension != identity.dimension:
+    # An identity of dimension 0 does not know it yet: the stored one stands.
+    if dimension and identity.dimension and dimension != identity.dimension:
         raise _outcome(
             StoreIncompatibleError,
             f"Vector store at {where} holds dimension {dimension}, not {identity.dimension}.",
@@ -680,6 +681,11 @@ def _check_identity(
 def _snapshot_from(
     stored: _Stored, matrix: Any, identity: EmbeddingIdentity, where: str
 ) -> _Snapshot:
+    if not identity.dimension:
+        known = stored.dimension or (
+            matrix.shape[1] if matrix.ndim == 2 and matrix.shape[0] else 0
+        )
+        identity = replace(identity, dimension=known)
     if matrix.size == 0:
         matrix = np.zeros((0, identity.dimension), dtype=np.float32)
     if matrix.ndim != 2 or matrix.shape[0] != len(stored.rows):

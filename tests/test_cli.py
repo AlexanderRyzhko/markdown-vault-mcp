@@ -1461,3 +1461,25 @@ def test_index_refuses_an_absent_source_dir(
     result = runner.invoke(app, ["index"])
     assert result.exit_code == 1
     assert "MARKDOWN_VAULT_MCP_SOURCE_DIR" in result.output
+
+
+def test_unusable_vectors_message_names_the_remedy_for_each_fault() -> None:
+    """A mismatch points at the settings that built the vectors; damage at a rebuild (#1777)."""
+    from markdown_vault_mcp.cli import _unusable_vectors_message
+    from markdown_vault_mcp.exceptions import (
+        StoreCorruptError,
+        StoreIncompatibleError,
+        VectorIndexUnusableError,
+    )
+
+    def unusable(cause: Exception) -> VectorIndexUnusableError:
+        exc = VectorIndexUnusableError(str(cause))
+        exc.__cause__ = cause
+        return exc
+
+    mismatch = unusable(
+        StoreIncompatibleError("other model", backend="numpy", location="x")
+    )
+    damage = unusable(StoreCorruptError("bad json", backend="numpy", location="x"))
+    assert "settings that built them" in _unusable_vectors_message(mismatch)
+    assert "rebuild" in _unusable_vectors_message(damage)

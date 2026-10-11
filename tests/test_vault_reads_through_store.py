@@ -220,3 +220,42 @@ class TestInMemory:
             assert vault._search_mgr.vectors is None
         finally:
             vault.close()
+
+
+class TestProviderDown:
+    def test_get_similar_answers_from_disk_with_the_provider_down(
+        self, tmp_path: Path
+    ) -> None:
+        source = _vault_dir(tmp_path)
+        (source / "gamma.md").write_text("# Gamma\n\nApples and boats.\n")
+        builder = Vault(
+            source_dir=source,
+            settings=_settings(tmp_path),
+            embedding_provider=MockEmbeddingProvider(),
+        )
+        builder.index.build_index()
+        builder.index.build_embeddings()
+        builder.close()
+
+        class DownProvider(MockEmbeddingProvider):
+            @property
+            def dimension(self) -> int:
+                raise ConnectionError("provider is down")
+
+            def embed(self, _texts: list[str]) -> list[list[float]]:
+                raise ConnectionError("provider is down")
+
+            def embed_query(self, _texts: list[str]) -> list[list[float]]:
+                raise ConnectionError("provider is down")
+
+        vault = Vault(
+            source_dir=source,
+            settings=_settings(tmp_path),
+            embedding_provider=DownProvider(),
+        )
+        try:
+            vault.index.build_index()  # warm: the index from the first vault
+            similar = vault.reader.get_similar("alpha.md", limit=2)
+            assert {r.path for r in similar} == {"beta.md", "gamma.md"}
+        finally:
+            vault.close()
