@@ -11,6 +11,7 @@ opening the same location again.
 from __future__ import annotations
 
 import math
+import sys
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -362,28 +363,38 @@ class VectorStoreContract:
 
         def read() -> None:
             local = np.random.default_rng(7)
-            while not stop.is_set():
-                q = local.normal(size=4)
-                qn = q / np.linalg.norm(q)
-                for r in store.search(q.tolist(), limit=10):
-                    v = np.asarray(r["v"])
-                    expected = float(qn @ (v / np.linalg.norm(v)))
-                    if abs(r["score"] - expected) > 1e-4:
-                        errors.append(
-                            f"score {r['score']} for a row whose vector gives {expected}"
-                        )
+            try:
+                while not stop.is_set():
+                    q = local.normal(size=4)
+                    qn = q / np.linalg.norm(q)
+                    for r in store.search(q.tolist(), limit=10):
+                        v = np.asarray(r["v"])
+                        expected = float(qn @ (v / np.linalg.norm(v)))
+                        if abs(r["score"] - expected) > 1e-4:
+                            errors.append(
+                                f"score {r['score']} for a row giving {expected}"
+                            )
+            except BaseException as exc:  # a misaligned pair can also crash a read
+                errors.append(f"reader raised {exc!r}")
 
-        readers = [threading.Thread(target=read) for _ in range(2)]
-        for t in readers:
-            t.start()
-        deadline = time.monotonic() + 0.5
-        while time.monotonic() < deadline:
-            store.replace_document(
-                rows(int(rng.integers(1, 6))), expected_token=ANY_TOKEN
-            )
-        stop.set()
-        for t in readers:
-            t.join()
+        # Switch threads as often as possible, so a writer that publishes in
+        # two steps is caught between them rather than by luck.
+        interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            readers = [threading.Thread(target=read) for _ in range(2)]
+            for t in readers:
+                t.start()
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                store.replace_document(
+                    rows(int(rng.integers(1, 6))), expected_token=ANY_TOKEN
+                )
+            stop.set()
+            for t in readers:
+                t.join()
+        finally:
+            sys.setswitchinterval(interval)
         assert errors == []
 
 

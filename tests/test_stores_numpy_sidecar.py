@@ -445,3 +445,93 @@ class TestPersistFailures:
         with pytest.raises(RuntimeError, match="closed"):
             store.count  # noqa: B018
         assert not base.with_suffix(".json").exists()
+
+
+def _mutate_commit(base: Path, change: Callable[[dict[str, Any]], None]) -> None:
+    json_path = base.with_suffix(".json")
+    payload = json.loads(json_path.read_text())
+    change(payload)
+    json_path.write_text(json.dumps(payload))
+
+
+class TestOpenRejectsMalformedState:
+    def _persisted(self, tmp_path: Path) -> Path:
+        base = _base(tmp_path)
+        store = NumpySidecarBackend().open(base, IDENT)
+        store.replace_document(doc("a.md", [[1, 0, 0]]), expected_token=ANY_TOKEN)
+        store.close()
+        return base
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            lambda p: p["index_metadata"].update(generation="x"),
+            lambda p: p["index_metadata"].update(generation=None),
+            lambda p: p["index_metadata"].update(matrix_seq="x"),
+            lambda p: p["index_metadata"].update(dimension="x"),
+            lambda p: p.update(index_metadata=[1]),
+            lambda p: p.update(tokens=5),
+            lambda p: p.update(tokens=["ab"]),
+            lambda p: p.update(tokens={"a.md": 7}),
+        ],
+        ids=[
+            "generation-str",
+            "generation-none",
+            "matrix_seq-str",
+            "dimension-str",
+            "index_metadata-list",
+            "tokens-int",
+            "tokens-list",
+            "token-value-int",
+        ],
+    )
+    def test_a_malformed_commit_field_is_corrupt(
+        self, tmp_path: Path, change: Callable[[dict[str, Any]], None]
+    ) -> None:
+        base = self._persisted(tmp_path)
+        _mutate_commit(base, change)
+        backend = NumpySidecarBackend()
+        with pytest.raises(StoreCorruptError):
+            backend.open(base, IDENT)
+
+    def test_a_matrix_of_strings_is_corrupt(self, tmp_path: Path) -> None:
+        base = self._persisted(tmp_path)
+        np.save(base.with_suffix(".m1.npy"), np.asarray([["a", "b", "c"]]))
+        backend = NumpySidecarBackend()
+        with pytest.raises(StoreCorruptError):
+            backend.open(base, IDENT)
+
+    def test_a_matrix_wider_than_the_identity_is_corrupt(self, tmp_path: Path) -> None:
+        base = self._persisted(tmp_path)
+        np.save(base.with_suffix(".m1.npy"), np.zeros((1, 4), dtype=np.float32))
+        backend = NumpySidecarBackend()
+        with pytest.raises(StoreCorruptError, match="columns"):
+            backend.open(base, IDENT)
+
+
+class TestReaderRacesWriter:
+    def test_a_checkpoint_between_reading_the_commit_and_the_matrix_is_survived(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        base = _base(tmp_path)
+        writer = NumpySidecarBackend().open(base, IDENT)
+        writer.replace_document(doc("a.md", [[1, 0, 0]]), expected_token=ANY_TOKEN)
+        writer.checkpoint()  # commits m1
+        real = numpy_sidecar._read_json
+        calls: list[int] = []
+
+        def stale_then_fresh(path: Path, where: str) -> Any:
+            payload = real(path, where)
+            if not calls:
+                # The writer commits m2 and removes m1 after the reader read
+                # the commit file naming m1.
+                writer.replace_document(
+                    doc("b.md", [[0, 1, 0]]), expected_token=ANY_TOKEN
+                )
+                writer.checkpoint()
+            calls.append(1)
+            return payload
+
+        monkeypatch.setattr(numpy_sidecar, "_read_json", stale_then_fresh)
+        reader = NumpySidecarBackend().open(base, IDENT, owns_files=False)
+        assert set(reader.tokens()) == {"a.md", "b.md"}

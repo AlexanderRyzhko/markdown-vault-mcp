@@ -484,6 +484,7 @@ class _Stored:
     tokens: dict[str, RevisionToken | None]
     generation: int
     seq: int
+    dimension: int
     matrix_path: Path
 
 
@@ -525,10 +526,52 @@ def _matrix_from(meta: dict[str, Any], base: Path, version: int, where: str) -> 
     return base.with_name(name)
 
 
+def _count(meta: dict[str, Any], key: str, where: str) -> int:
+    """Return a non-negative integer field of the commit file, or refuse it."""
+    value = meta.get(key, 0)
+    if value is None and key == "dimension":
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise _outcome(
+            StoreCorruptError,
+            f"Vector store at {where} has a malformed {key}: {value!r}.",
+            where,
+        )
+    return value
+
+
+def _meta_of(payload: dict[str, Any], where: str) -> dict[str, Any]:
+    meta = payload.get("index_metadata")
+    if meta is None:
+        return {}
+    if not isinstance(meta, dict):
+        raise _outcome(
+            StoreCorruptError,
+            f"Vector store at {where} has malformed index_metadata.",
+            where,
+        )
+    return meta
+
+
+def _tokens_of(
+    payload: dict[str, Any], version: int, where: str
+) -> dict[str, RevisionToken | None]:
+    tokens = payload.get("tokens", {}) if version >= 2 else {}
+    well_formed = isinstance(tokens, dict) and all(
+        isinstance(k, str) and (v is None or isinstance(v, str))
+        for k, v in tokens.items()
+    )
+    if not well_formed:
+        raise _outcome(
+            StoreCorruptError, f"Vector store at {where} has malformed tokens.", where
+        )
+    return dict(tokens)
+
+
 def _parse(payload: Any, base: Path, where: str) -> _Stored:
     if isinstance(payload, list):
         logger.warning("numpy_store_legacy_rows_unverified path=%s", where)
-        return _Stored(1, None, payload, {}, 0, 0, base.with_suffix(".npy"))
+        return _Stored(1, None, payload, {}, 0, 0, 0, base.with_suffix(".npy"))
     if not isinstance(payload, dict):
         raise _outcome(
             StoreCorruptError, f"Vector store at {where} has an unknown layout.", where
@@ -541,32 +584,35 @@ def _parse(payload: Any, base: Path, where: str) -> _Stored:
             f"this version reads up to {FORMAT_VERSION}.",
             where,
         )
-    meta = payload.get("index_metadata") or {}
+    meta = _meta_of(payload, where)
     rows = payload.get("rows", [])
     if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
         raise _outcome(
             StoreCorruptError, f"Vector store at {where} has malformed rows.", where
         )
-    tokens = payload.get("tokens", {}) if version >= 2 else {}
     return _Stored(
         version,
         meta,
         rows,
-        dict(tokens),
-        int(meta.get("generation", 0)),
-        int(meta.get("matrix_seq", 0)),
+        _tokens_of(payload, version, where),
+        _count(meta, "generation", where),
+        _count(meta, "matrix_seq", where),
+        _count(meta, "dimension", where),
         _matrix_from(meta, base, version, where),
     )
 
 
-def _read_matrix(path: Path, where: str) -> Any:
+def _read_matrix(path: Path, where: str) -> Any | None:
+    """Return the matrix at *path*, or ``None`` when it is gone.
+
+    A missing matrix may mean a writer committed a newer one and removed
+    this one after the commit file was read, so the caller decides.
+    """
     try:
-        matrix = np.load(path, allow_pickle=False)
-    except FileNotFoundError as exc:
-        raise _outcome(
-            StoreCorruptError, f"Vector store at {where} lost {path.name}.", where
-        ) from exc
-    except (ValueError, EOFError) as exc:
+        return np.load(path, allow_pickle=False).astype(np.float32, copy=False)
+    except FileNotFoundError:
+        return None
+    except (ValueError, TypeError, EOFError) as exc:
         raise _outcome(
             StoreCorruptError,
             f"Vector store at {where} has an unreadable {path.name}: {exc}",
@@ -578,7 +624,6 @@ def _read_matrix(path: Path, where: str) -> Any:
             f"Vector store at {where} cannot be read: {exc}",
             where,
         ) from exc
-    return matrix.astype(np.float32, copy=False)
 
 
 def _check_identity(
@@ -603,7 +648,7 @@ def _check_identity(
                 f"Vector store at {where} holds {persisted}, not {expected}.",
                 where,
             )
-    dimension = int((stored.meta or {}).get("dimension") or 0) or (
+    dimension = stored.dimension or (
         matrix.shape[1] if matrix.ndim == 2 and matrix.shape[0] else 0
     )
     if dimension and dimension != identity.dimension:
@@ -626,12 +671,38 @@ def _snapshot_from(
             f"{matrix.shape} matrix.",
             where,
         )
+    if matrix.shape[0] and matrix.shape[1] != identity.dimension:
+        raise _outcome(
+            StoreCorruptError,
+            f"Vector store at {where} records dimension {identity.dimension} but its "
+            f"matrix has {matrix.shape[1]} columns.",
+            where,
+        )
     return _Snapshot(
         identity,
         stored.generation,
         _frozen(np.array(matrix, dtype=np.float32)),
         tuple(stored.rows),
         MappingProxyType(stored.tokens),
+    )
+
+
+def _load_committed(json_path: Path, base: Path, where: str) -> tuple[_Stored, Any]:
+    """Read the commit file and the matrix it names.
+
+    A writer in another process may commit a newer matrix and remove the
+    named one between the two reads; the commit file is read again once
+    before the store is called corrupt.
+    """
+    for _ in range(2):
+        stored = _parse(_read_json(json_path, where), base, where)
+        matrix = _read_matrix(stored.matrix_path, where)
+        if matrix is not None:
+            return stored, matrix
+    raise _outcome(
+        StoreCorruptError,
+        f"Vector store at {where} lost {stored.matrix_path.name}.",
+        where,
     )
 
 
@@ -664,8 +735,7 @@ def _open_file(
         return NumpySidecarStore(
             _fresh(identity), base=base, read_only=read_only, seq=0, matrix_path=None
         )
-    stored = _parse(_read_json(json_path, where), base, where)
-    matrix = _read_matrix(stored.matrix_path, where)
+    stored, matrix = _load_committed(json_path, base, where)
     _check_identity(stored, matrix, identity, where)
     snap = _snapshot_from(stored, matrix, identity, where)
     logger.info(
