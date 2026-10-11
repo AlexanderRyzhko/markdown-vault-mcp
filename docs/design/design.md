@@ -4025,7 +4025,8 @@ provider, model, variant and text format from configuration and takes
 the dimension from the stored files, because `provider.dimension` is a
 network probe for several providers: stored vectors stay readable with
 the provider down. The writer path, which needs the provider anyway,
-checks the dimension before writing. On an owned store, corrupt or
+checks the dimension before writing; a read that finds nothing stored
+installs nothing, so the writer always sets the dimension. On an owned store, corrupt or
 another identity rebuilds through `VectorBackend.open_fresh`; without
 ownership both raise `VectorIndexUnusableError`; unavailable and
 unsupported always propagate. `SearchManager` embeds queries itself; the
