@@ -159,3 +159,47 @@ class TestVectorValueTypes:
         assert _AnyToken() is ANY_TOKEN
         assert ANY_TOKEN is not None
         assert repr(ANY_TOKEN) == "ANY_TOKEN"
+
+
+class TestVectorProtocols:
+    def test_the_facets_are_separable_and_combine(self) -> None:
+        from markdown_vault_mcp.interfaces import (
+            EmbeddingStore,
+            VectorPublisher,
+            VectorReader,
+        )
+
+        class Reader:
+            identity = None
+            generation = 0
+            count = 0
+
+            def search(self, *_a: object, **_k: object) -> list[object]:
+                return []
+
+            def similar_to_document(self, *_a: object, **_k: object) -> list[object]:
+                return []
+
+            def rows_for(self, _path: str) -> list[object]:
+                return []
+
+            def tokens(self) -> dict[str, object]:
+                return {}
+
+        class Full(Reader):
+            def replace_document(self, *_a: object, **_k: object) -> str:
+                return "published"
+
+            def remove_document(self, *_a: object, **_k: object) -> str:
+                return "published"
+
+            def publish_generation(self, *_a: object, **_k: object) -> None: ...
+
+            def close(self) -> None: ...
+
+            def checkpoint(self) -> None: ...
+
+        assert isinstance(Reader(), VectorReader)
+        assert not isinstance(Reader(), VectorPublisher)
+        assert not isinstance(Reader(), EmbeddingStore)
+        assert isinstance(Full(), EmbeddingStore)
