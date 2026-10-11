@@ -25,16 +25,28 @@ identity*. *Not configured* cannot happen: no location means in memory.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import tempfile
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any
 
-from markdown_vault_mcp.exceptions import ReadOnlyError
+from markdown_vault_mcp.exceptions import (
+    ReadOnlyError,
+    StoreCorruptError,
+    StoreIncompatibleError,
+    StoreOpenError,
+    StoreUnavailableError,
+    StoreUnsupportedSchemaError,
+)
 from markdown_vault_mcp.stores.registry import register_backend
 from markdown_vault_mcp.types import ANY_TOKEN, EmbeddingIdentity, VectorRow
 from markdown_vault_mcp.utils import folder_matches
+from markdown_vault_mcp.utils.fs import is_directory, path_exists
 
 try:
     import numpy as np
@@ -45,7 +57,6 @@ except ImportError:  # pragma: no cover - exercised only without the extra
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
-    from pathlib import Path
 
     from markdown_vault_mcp.types import (
         DocumentRows,
@@ -117,6 +128,58 @@ def _row_vectors(rows: Sequence[VectorRow], dimension: int) -> Any:
 
 def _metadata(document: DocumentRows) -> list[dict[str, Any]]:
     return [{**row.metadata, "path": document.path} for row in document.rows]
+
+
+def _matrix_path(base: Path, seq: int) -> Path:
+    return base.with_suffix(f".m{seq}.npy")
+
+
+def _write_atomic(target: Path, write: Callable[[IO[bytes]], object]) -> None:
+    """Write *target* through a synced temp file and one atomic rename."""
+    fd, tmp = tempfile.mkstemp(
+        dir=target.parent, prefix=f"{target.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            write(fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        Path(tmp).replace(target)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _commit_file(path: Path, data: bytes) -> None:
+    """Atomically replace the JSON commit file: the moment a persist lands."""
+    _write_atomic(path, lambda fh: fh.write(data))
+
+
+def _remove_stale(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("numpy_store_stale_matrix_kept path=%s err=%s", path, exc)
+
+
+def _payload(snap: _Snapshot, matrix_name: str, seq: int) -> bytes:
+    ident = snap.identity
+    body = {
+        "format_version": FORMAT_VERSION,
+        "index_metadata": {
+            "provider": ident.provider,
+            "model": ident.model,
+            "provider_variant": ident.variant,
+            "embed_text_format": ident.text_format,
+            "dimension": ident.dimension,
+            "generation": snap.generation,
+            "matrix": matrix_name,
+            "matrix_seq": seq,
+        },
+        "rows": list(snap.rows),
+        "tokens": dict(snap.tokens),
+    }
+    return json.dumps(body, ensure_ascii=False).encode("utf-8")
 
 
 class NumpySidecarStore:
@@ -357,11 +420,31 @@ class NumpySidecarStore:
 
     # -- lifecycle -----------------------------------------------------------
 
-    def _persist(self, snap: _Snapshot) -> None:  # noqa: ARG002
-        """Write *snap* to disk; a no-op in memory (Task 4 adds files)."""
+    def _persist(self, snap: _Snapshot) -> None:
+        """Write *snap* to disk, committing with the JSON; a no-op in memory.
+
+        The payload is encoded before any file is written, so metadata JSON
+        cannot encode leaves the disk untouched.
+        """
         if self._base is None:
             return
-        raise NotImplementedError("file locations arrive in Task 4")
+        seq = self._seq + 1
+        matrix_path = _matrix_path(self._base, seq)
+        data = _payload(snap, matrix_path.name, seq)
+        matrix_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_atomic(
+            matrix_path, lambda fh: np.save(fh, np.ascontiguousarray(snap.matrix))
+        )
+        _commit_file(self._base.with_suffix(".json"), data)
+        previous, self._seq, self._matrix_path = self._matrix_path, seq, matrix_path
+        if previous is not None and previous != matrix_path:
+            _remove_stale(previous)
+        logger.debug(
+            "numpy_store_checkpointed path=%s rows=%d generation=%d",
+            self._base,
+            len(snap.rows),
+            snap.generation,
+        )
 
     def checkpoint(self) -> None:
         """Persist pending changes; a no-op in memory, read-only or clean.
@@ -391,6 +474,216 @@ class NumpySidecarStore:
             self._closed = True
 
 
+@dataclass(frozen=True)
+class _Stored:
+    """What a commit file says, before the matrix is read."""
+
+    version: int
+    meta: dict[str, Any] | None
+    rows: list[dict[str, Any]]
+    tokens: dict[str, RevisionToken | None]
+    generation: int
+    seq: int
+    matrix_path: Path
+
+
+def _outcome(kind: type[StoreOpenError], message: str, where: str) -> StoreOpenError:
+    return kind(message, backend=_BACKEND_NAME, location=where)
+
+
+def _read_json(path: Path, where: str) -> Any:
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError as exc:
+        raise _outcome(
+            StoreCorruptError, f"Vector store at {where} lost {path.name}.", where
+        ) from exc
+    except OSError as exc:
+        raise _outcome(
+            StoreUnavailableError,
+            f"Vector store at {where} cannot be read: {exc}",
+            where,
+        ) from exc
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _outcome(
+            StoreCorruptError,
+            f"Vector store at {where} has an unreadable {path.name}: {exc}",
+            where,
+        ) from exc
+
+
+def _matrix_from(meta: dict[str, Any], base: Path, version: int, where: str) -> Path:
+    if version < 2:
+        return base.with_suffix(".npy")
+    name = meta.get("matrix")
+    if not isinstance(name, str) or Path(name).name != name or not name:
+        raise _outcome(
+            StoreCorruptError, f"Vector store at {where} names no usable matrix.", where
+        )
+    return base.with_name(name)
+
+
+def _parse(payload: Any, base: Path, where: str) -> _Stored:
+    if isinstance(payload, list):
+        logger.warning("numpy_store_legacy_rows_unverified path=%s", where)
+        return _Stored(1, None, payload, {}, 0, 0, base.with_suffix(".npy"))
+    if not isinstance(payload, dict):
+        raise _outcome(
+            StoreCorruptError, f"Vector store at {where} has an unknown layout.", where
+        )
+    version = payload.get("format_version", 1)
+    if not isinstance(version, int) or not 1 <= version <= FORMAT_VERSION:
+        raise _outcome(
+            StoreUnsupportedSchemaError,
+            f"Vector store at {where} has format_version {version!r}; "
+            f"this version reads up to {FORMAT_VERSION}.",
+            where,
+        )
+    meta = payload.get("index_metadata") or {}
+    rows = payload.get("rows", [])
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        raise _outcome(
+            StoreCorruptError, f"Vector store at {where} has malformed rows.", where
+        )
+    tokens = payload.get("tokens", {}) if version >= 2 else {}
+    return _Stored(
+        version,
+        meta,
+        rows,
+        dict(tokens),
+        int(meta.get("generation", 0)),
+        int(meta.get("matrix_seq", 0)),
+        _matrix_from(meta, base, version, where),
+    )
+
+
+def _read_matrix(path: Path, where: str) -> Any:
+    try:
+        matrix = np.load(path, allow_pickle=False)
+    except FileNotFoundError as exc:
+        raise _outcome(
+            StoreCorruptError, f"Vector store at {where} lost {path.name}.", where
+        ) from exc
+    except (ValueError, EOFError) as exc:
+        raise _outcome(
+            StoreCorruptError,
+            f"Vector store at {where} has an unreadable {path.name}: {exc}",
+            where,
+        ) from exc
+    except OSError as exc:
+        raise _outcome(
+            StoreUnavailableError,
+            f"Vector store at {where} cannot be read: {exc}",
+            where,
+        ) from exc
+    return matrix.astype(np.float32, copy=False)
+
+
+def _check_identity(
+    stored: _Stored, matrix: Any, identity: EmbeddingIdentity, where: str
+) -> None:
+    if stored.meta is not None:
+        persisted = (
+            stored.meta.get("provider"),
+            stored.meta.get("model"),
+            stored.meta.get("provider_variant") or "",
+            stored.meta.get("embed_text_format") or "v1",
+        )
+        expected = (
+            identity.provider,
+            identity.model,
+            identity.variant,
+            identity.text_format,
+        )
+        if persisted != expected:
+            raise _outcome(
+                StoreIncompatibleError,
+                f"Vector store at {where} holds {persisted}, not {expected}.",
+                where,
+            )
+    dimension = int((stored.meta or {}).get("dimension") or 0) or (
+        matrix.shape[1] if matrix.ndim == 2 and matrix.shape[0] else 0
+    )
+    if dimension and dimension != identity.dimension:
+        raise _outcome(
+            StoreIncompatibleError,
+            f"Vector store at {where} holds dimension {dimension}, not {identity.dimension}.",
+            where,
+        )
+
+
+def _snapshot_from(
+    stored: _Stored, matrix: Any, identity: EmbeddingIdentity, where: str
+) -> _Snapshot:
+    if matrix.size == 0:
+        matrix = np.zeros((0, identity.dimension), dtype=np.float32)
+    if matrix.ndim != 2 or matrix.shape[0] != len(stored.rows):
+        raise _outcome(
+            StoreCorruptError,
+            f"Vector store at {where} has {len(stored.rows)} rows but a "
+            f"{matrix.shape} matrix.",
+            where,
+        )
+    return _Snapshot(
+        identity,
+        stored.generation,
+        _frozen(np.array(matrix, dtype=np.float32)),
+        tuple(stored.rows),
+        MappingProxyType(stored.tokens),
+    )
+
+
+def _open_file(
+    base: Path, identity: EmbeddingIdentity, *, read_only: bool
+) -> NumpySidecarStore:
+    where = str(base)
+    json_path, legacy = base.with_suffix(".json"), base.with_suffix(".npy")
+    try:
+        if path_exists(base.parent) and not is_directory(base.parent):
+            raise _outcome(
+                StoreUnavailableError,
+                f"Vector store at {where} cannot be opened: {base.parent} is not a directory.",
+                where,
+            )
+        has_json, has_legacy = path_exists(json_path), path_exists(legacy)
+    except OSError as exc:
+        raise _outcome(
+            StoreUnavailableError,
+            f"Vector store at {where} cannot be checked: {exc}",
+            where,
+        ) from exc
+    if not has_json:
+        if has_legacy:
+            raise _outcome(
+                StoreCorruptError,
+                f"Vector store at {where} has {legacy.name} but no {json_path.name}.",
+                where,
+            )
+        return NumpySidecarStore(
+            _fresh(identity), base=base, read_only=read_only, seq=0, matrix_path=None
+        )
+    stored = _parse(_read_json(json_path, where), base, where)
+    matrix = _read_matrix(stored.matrix_path, where)
+    _check_identity(stored, matrix, identity, where)
+    snap = _snapshot_from(stored, matrix, identity, where)
+    logger.info(
+        "numpy_store_opened path=%s rows=%d generation=%d format_version=%d",
+        where,
+        len(snap.rows),
+        snap.generation,
+        stored.version,
+    )
+    return NumpySidecarStore(
+        snap,
+        base=base,
+        read_only=read_only,
+        seq=stored.seq,
+        matrix_path=stored.matrix_path,
+    )
+
+
 class NumpySidecarBackend:
     """Open a :class:`NumpySidecarStore` at a base path, or in memory."""
 
@@ -402,7 +695,7 @@ class NumpySidecarBackend:
         location: Path | str | None,
         identity: object | None = None,
         *,
-        owns_files: bool = True,  # noqa: ARG002
+        owns_files: bool = True,
     ) -> NumpySidecarStore:
         """Open the store.
 
@@ -419,6 +712,10 @@ class NumpySidecarBackend:
         Raises:
             ImportError: If numpy is not installed.
             ValueError: If *identity* is not an ``EmbeddingIdentity``.
+            StoreUnavailableError: If the files cannot be reached.
+            StoreCorruptError: If they do not form a store.
+            StoreUnsupportedSchemaError: If their format is newer.
+            StoreIncompatibleError: If they hold another identity.
         """
         if not _NUMPY_AVAILABLE:  # pragma: no cover - exercised only without the extra
             raise ImportError(
@@ -431,7 +728,7 @@ class NumpySidecarBackend:
             return NumpySidecarStore(
                 _fresh(identity), base=None, read_only=False, seq=0, matrix_path=None
             )
-        raise NotImplementedError("file locations arrive in Task 4")
+        return _open_file(Path(location), identity, read_only=not owns_files)
 
 
 register_backend("vector", _BACKEND_NAME, NumpySidecarBackend)
