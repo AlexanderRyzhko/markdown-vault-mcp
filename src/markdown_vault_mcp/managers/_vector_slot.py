@@ -6,24 +6,26 @@ some providers answer with a network probe; a provider that is down must
 not stop a vault from being built. On a store the vault owns, a corrupt
 store or one holding another identity (a model change) is rebuilt into a
 fresh generation through the caller's ``rebuild``; without a rebuild (a
-process that does not own the files) both raise
-:class:`~markdown_vault_mcp.exceptions.VectorIndexUnusableError`. A store
+process that does not own the files) the store's own
+:class:`~markdown_vault_mcp.exceptions.StoreCorruptError` or
+:class:`~markdown_vault_mcp.exceptions.StoreIncompatibleError` propagates,
+and such a process never creates or replaces the files (#1778). A store
 that is unavailable or of an unsupported schema always propagates. An
 injected store is the caller's: never rebuilt on a fault, never closed.
 """
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import logging
 from typing import TYPE_CHECKING, Any
 
 from markdown_vault_mcp.exceptions import (
+    ReadOnlyError,
     StoreCorruptError,
     StoreIncompatibleError,
-    VectorIndexUnusableError,
 )
-from markdown_vault_mcp.managers._legacy_vector_writes import LegacyVectorWrites
 from markdown_vault_mcp.types import EmbeddingIdentity
 
 if TYPE_CHECKING:
@@ -33,27 +35,10 @@ if TYPE_CHECKING:
     from markdown_vault_mcp.interfaces import (
         EmbeddingStore,
         VectorBackend,
-        VectorStore,
     )
     from markdown_vault_mcp.providers import EmbeddingProvider
 
 logger = logging.getLogger(__name__)
-
-
-@dataclasses.dataclass(frozen=True)
-class VectorStoreAccess:
-    """The vault's store as the embeddings writer reaches it, until #1778.
-
-    Attributes:
-        open: Opens the store for writing, rebuilding an owned one that will
-            not open.
-        fresh: Installs an empty store to rebuild into.
-        describe: Backend, identity and generation for ``embeddings_status``.
-    """
-
-    open: Callable[[], VectorStore]
-    fresh: Callable[[], VectorStore]
-    describe: Callable[[], dict[str, Any]]
 
 
 class VectorStoreSlot:
@@ -86,7 +71,6 @@ class VectorStoreSlot:
         self._store = store
         self._injected = store is not None
         self._identity: EmbeddingIdentity | None = None
-        self._legacy: LegacyVectorWrites | None = None
 
     @property
     def location(self) -> Path | None:
@@ -97,6 +81,11 @@ class VectorStoreSlot:
     def injected(self) -> bool:
         """Whether the caller passed the store in."""
         return self._injected
+
+    @property
+    def owns_files(self) -> bool:
+        """Whether this process may rebuild the store's files."""
+        return self._owns_files
 
     @property
     def backend_name(self) -> str:
@@ -136,6 +125,14 @@ class VectorStoreSlot:
             dimension=0,
         )
 
+    def _run_rebuild(self, rebuild: Callable[[], object]) -> None:
+        """Run *rebuild*, logging a failure before it propagates."""
+        try:
+            rebuild()
+        except Exception:
+            logger.exception("vector_store_rebuild_failed location=%s", self._location)
+            raise
+
     def current(self) -> EmbeddingStore | None:
         """Return the installed store, opening nothing."""
         return self._store
@@ -144,7 +141,7 @@ class VectorStoreSlot:
         """Return the store, opening it on first use.
 
         A store that opens with nothing stored and no known dimension is
-        returned but not installed, so the writer's :meth:`legacy_get` still
+        returned but not installed, so the writer's :meth:`writable` still
         sets the provider's dimension.
 
         Args:
@@ -153,8 +150,10 @@ class VectorStoreSlot:
                 ``None`` forbids it.
 
         Raises:
-            VectorIndexUnusableError: If the store is corrupt or of another
-                identity and no rebuild is allowed.
+            StoreCorruptError: If the store is corrupt and no rebuild is
+                allowed.
+            StoreIncompatibleError: If the store holds another identity and
+                no rebuild is allowed.
             ValueError: If a rebuild installs no store.
             StoreOpenError: If the store is unavailable or of an unsupported
                 schema.
@@ -167,13 +166,13 @@ class VectorStoreSlot:
             )
         except (StoreCorruptError, StoreIncompatibleError) as exc:
             if rebuild is None:
-                raise VectorIndexUnusableError(str(exc)) from exc
+                raise
             logger.warning(
                 "vector_store_rebuild_started location=%s reason=%s",
                 self._location,
                 type(exc).__name__,
             )
-            rebuild()
+            self._run_rebuild(rebuild)
             if self._store is None:
                 raise ValueError(
                     "Failed to rebuild the vector store after it would not open."
@@ -182,7 +181,7 @@ class VectorStoreSlot:
         if store.identity.dimension == 0:
             # Nothing is stored and the dimension is not known: let the read
             # search the empty store, but install nothing, so the writer
-            # opens through legacy_get, which learns the provider's dimension.
+            # opens through writable(), which learns the provider's dimension.
             return store
         self._store = store
         return store
@@ -191,73 +190,135 @@ class VectorStoreSlot:
         """Install *store* (or clear the slot)."""
         self._store = store
 
-    def replace_any(self, value: object) -> None:
-        """Install a store, or the store under a :class:`LegacyVectorWrites`."""
-        store = value.store if isinstance(value, LegacyVectorWrites) else value
-        self._store = store  # type: ignore[assignment]
-
     def fresh(self) -> EmbeddingStore:
         """Install and return an empty store at the identity, to rebuild into.
 
         An owned slot opens a fresh store over the location and drops the
         old object without closing it, so its unsaved rows are not written
         over the rebuild. An injected store is emptied in place.
+
+        Raises:
+            ReadOnlyError: If this process does not own the store's files.
         """
+        self._refuse_unowned()
         if self._injected and self._store is not None:
             self._store.publish_generation(self.identity, [])
             return self._store
         self._store = self._backend.open_fresh(self._location, self.identity)
         return self._store
 
-    def legacy(self) -> LegacyVectorWrites | None:
-        """Return the cached adapter over the installed store, or ``None``."""
-        if self._store is None or self._provider is None:
+    def _answers(self, store: EmbeddingStore) -> bool:
+        """Whether *store*'s rows answer this provider's queries: the same identity."""
+        return store.identity == self.identity
+
+    def _same_space(self, store: EmbeddingStore) -> bool:
+        """Whether *store* was embedded by this provider's model and format.
+
+        The dimension is left out: it may need a network probe, and a vector
+        of another dimension is refused by the store anyway.
+        """
+        provider = self._provider
+        if provider is None:
+            return False
+        held = store.identity
+        return (held.provider, held.model, held.variant, held.text_format) == (
+            provider.provider_name,
+            provider.model_name,
+            provider.provider_variant,
+            self._text_format,
+        )
+
+    def writable_current(self) -> EmbeddingStore | None:
+        """Return the installed store if this provider may write to it, else ``None``.
+
+        Opens nothing and asks the provider for nothing: the reindex path
+        writes only into a store already open, and never into one embedded
+        by another model.
+        """
+        store = self._store
+        if store is None or not self._same_space(store):
             return None
-        if self._legacy is None or self._legacy.store is not self._store:
-            self._legacy = LegacyVectorWrites(self._store, self._provider)
-        return self._legacy
+        return store
 
-    def legacy_get(self, *, rebuild: Callable[[], object] | None) -> LegacyVectorWrites:
-        """Open (installing) and return the adapter over the store, for writing.
-
-        Writing needs the provider, so here its dimension is checked against
-        the store's: an empty store takes the full identity (an owned one is
-        replaced by a fresh one, an injected one is emptied in place, losing
-        nothing); a populated one of another dimension is rebuilt, or refused
-        without ``rebuild`` or when injected.
+    def _refuse_unowned(self) -> None:
+        """Refuse to create or replace files this process does not own.
 
         Raises:
-            VectorIndexUnusableError: If the store holds another dimension
-                and no rebuild is allowed.
+            ReadOnlyError: If the store is on disk, not injected, and not owned.
+        """
+        if self._location is not None and not self._owns_files and not self._injected:
+            raise ReadOnlyError(
+                "This process does not own the vector store's files; rebuild "
+                "the embeddings in the process that owns them."
+            )
+
+    def _mismatch(self, store: EmbeddingStore) -> str:
+        """Say which embeddings *store* holds and which the provider makes."""
+        held, wanted = store.identity, self.identity
+        return (
+            f"The vector store holds {held.model} vectors of dimension "
+            f"{held.dimension}; the provider embeds {wanted.model} at "
+            f"dimension {wanted.dimension}."
+        )
+
+    def writable(self, *, rebuild: Callable[[], object] | None) -> EmbeddingStore:
+        """Open (installing) and return the store, for writing.
+
+        Writing needs the provider, so here its identity, dimension included,
+        is checked against the store's: an empty store takes the provider's
+        identity (an owned one is replaced by a fresh one, an injected one is
+        emptied in place, losing nothing); a populated one of another
+        identity is rebuilt, or refused without ``rebuild`` or when injected.
+
+        Raises:
+            StoreIncompatibleError: If the store holds another identity and
+                may not be rebuilt.
         """
         store = self.get(rebuild=rebuild)
-        if store.identity.dimension != self.identity.dimension:
+        if not self._answers(store):
             if store.count == 0:
                 self.fresh()
             elif rebuild is None or self._injected:
-                raise VectorIndexUnusableError(
-                    f"The vector store holds dimension {store.identity.dimension}; "
-                    f"the provider embeds {self.identity.dimension}."
+                raise StoreIncompatibleError(
+                    self._mismatch(store),
+                    backend=self.backend_name,
+                    location=str(self._location) if self._location else ":memory:",
                 )
             else:
                 logger.warning(
                     "vector_store_rebuild_started location=%s reason=%s",
                     self._location,
-                    "dimension",
+                    "identity",
                 )
-                rebuild()
-        adapter = self.legacy()
-        if adapter is None:  # pragma: no cover - get() installed a store
+                self._run_rebuild(rebuild)
+        installed = self._store
+        if installed is None:  # pragma: no cover - get() or fresh() installed one
             raise RuntimeError("The vector store did not install.")
-        return adapter
+        return installed
 
-    def legacy_fresh(self) -> LegacyVectorWrites:
-        """Install a fresh store and return the adapter over it."""
-        self.fresh()
-        adapter = self.legacy()
-        if adapter is None:  # pragma: no cover - fresh() installed a store
-            raise RuntimeError("The vector store did not install.")
-        return adapter
+    def rebuild_target(self) -> EmbeddingStore:
+        """Return the store a full rebuild publishes into.
+
+        The store (opened first if need be), when its rows answer this
+        provider's queries: the rebuild publishes one generation into it at
+        the end, so readers keep its rows meanwhile and a rebuild that embeds
+        nothing leaves them. Otherwise :meth:`fresh`: a fresh store over the
+        location for an owned slot (the old files survive until the rebuild
+        publishes), the injected store emptied in place.
+
+        Raises:
+            ReadOnlyError: If this process does not own the store's files.
+            StoreOpenError: If the store is unavailable or of an unsupported
+                schema.
+        """
+        self._refuse_unowned()
+        if self._store is None:
+            # A store that will not open is rebuilt into a fresh one below.
+            with contextlib.suppress(StoreCorruptError, StoreIncompatibleError):
+                self.get(rebuild=None)
+        if self._store is not None and self._answers(self._store):
+            return self._store
+        return self.fresh()
 
     def describe(self) -> dict[str, Any]:
         """Return backend, identity and generation for ``embeddings_status``."""
