@@ -234,3 +234,33 @@ class TestBulkRetoken:
         rec.reconcile(store, site="test")
         assert (calls, store.generation) == ([], generation + 1)
         assert None not in store.tokens().values()
+
+
+class TestRebuild:
+    def test_it_publishes_one_generation_with_tokens(self, tmp_path):
+        fts, _, store, rec = _setup(tmp_path, NOTES)
+        assert rec.rebuild(store, store.identity) == (2, 2)
+        hashes = {r["path"]: r["content_hash"] for r in fts.list_chunks()}
+        assert (store.generation, store.tokens()) == (1, hashes)
+
+    def test_a_failed_batch_is_left_for_convergence(self, tmp_path):
+        notes = {f"n{i}.md": f"# N{i}\n\nBody {i}.\n" for i in range(6)}
+        _fts, provider, store, rec = _setup(tmp_path, notes)
+        real = provider.embed
+        calls = 0
+
+        def second_batch_fails(texts: list[str]) -> list[list[float]]:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("provider down")
+            return real(texts)
+
+        provider.embed = second_batch_fails  # type: ignore[method-assign]
+        embedded, attempted = rec.rebuild(store, store.identity)
+        assert (embedded, attempted) == (4, 6)
+        provider.embed = real  # type: ignore[method-assign]
+        provider.texts.clear()
+        result = rec.reconcile(store, site="test")
+        assert result.embedded == 2
+        assert len(provider.texts) == 2

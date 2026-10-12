@@ -16,6 +16,9 @@ holds no rows for may lose its vectors stays with the caller
 from __future__ import annotations
 
 import logging
+import math
+import time
+from array import array
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -29,7 +32,7 @@ if TYPE_CHECKING:
     from markdown_vault_mcp.embed_text import EmbedTextBuilder
     from markdown_vault_mcp.interfaces import EmbeddingStore, KeywordIndex
     from markdown_vault_mcp.providers import EmbeddingProvider
-    from markdown_vault_mcp.types import RevisionToken
+    from markdown_vault_mcp.types import EmbeddingIdentity, RevisionToken
 
 logger = logging.getLogger(__name__)
 
@@ -325,8 +328,154 @@ class EmbeddingReconciler:
         )
         state.result.retokened += len(docs)
 
+    def rebuild(
+        self, store: EmbeddingStore, identity: EmbeddingIdentity
+    ) -> tuple[int, int]:
+        """Embed every document the keyword index holds and publish one generation.
+
+        Texts are embedded in batches across documents; a batch the
+        provider fails, or that the store would refuse, is logged and
+        skipped, so a document it touched is published with the rest of
+        its rows and re-embedded by the next convergence pass. Nothing is
+        published when nothing was embedded: whether an empty build may
+        replace the store is the caller's call.
+
+        Args:
+            store: The store to publish into.
+            identity: The identity the vectors are embedded at.
+
+        Returns:
+            ``(embedded, attempted)`` chunk counts.
+        """
+        docs = [d for d in self.documents().values() if d.texts]
+        flat = [
+            (doc.path, doc.token, text, meta)
+            for doc in docs
+            for text, meta in zip(doc.texts, doc.metadata, strict=True)
+        ]
+        kept = self._embed_batches(flat, identity.dimension)
+        if kept:
+            store.publish_generation(identity, _group(kept))
+        return len(kept), len(flat)
+
+    def _embed_batches(
+        self,
+        flat: list[tuple[str, RevisionToken, str, dict[str, Any]]],
+        dimension: int,
+    ) -> list[tuple[str, RevisionToken, VectorRow]]:
+        """Embed *flat* in bounded batches, skipping a batch that fails.
+
+        Per-batch detail logs at DEBUG; INFO carries only a decile heartbeat
+        with an ETA (#311). A batch the provider rejects is logged and
+        skipped rather than aborting the build (#649).
+        """
+        total = len(flat)
+        started = time.monotonic()
+        last_decile = 0
+        kept: list[tuple[str, RevisionToken, VectorRow]] = []
+        for start in range(0, total, self._batch_size):
+            end = min(start + self._batch_size, total)
+            batch = flat[start:end]
+            try:
+                vectors = _float32_batch(
+                    self._provider.embed([item[2] for item in batch]),
+                    dimension,
+                    end - start,
+                )
+            except Exception as exc:
+                # Broad by design: providers raise heterogeneous types for an
+                # oversized batch (RuntimeError, httpx errors, ...).
+                logger.warning(
+                    "build_embeddings_skip_batch chunks_start=%d chunks_end=%d "
+                    "chunks_total=%d err=%s",
+                    start + 1,
+                    end,
+                    total,
+                    exc,
+                    exc_info=True,
+                )
+            else:
+                kept.extend(
+                    (path, token, VectorRow(vector, dict(meta)))
+                    for (path, token, _text, meta), vector in zip(
+                        batch, vectors, strict=True
+                    )
+                )
+            logger.debug(
+                "build_embeddings_embedded_batch chunks_start=%d chunks_end=%d "
+                "chunks_total=%d",
+                start + 1,
+                end,
+                total,
+            )
+            last_decile = _log_progress(end, total, started, last_decile)
+        return kept
+
     @staticmethod
     def _conflict(state: _Pass, path: str) -> None:
         """Record that another writer changed *path* underneath this pass."""
         state.result.conflicts.add(path)
         logger.info("embedding_reconcile_conflict site=%s path=%s", state.site, path)
+
+
+def _group(
+    kept: list[tuple[str, RevisionToken, VectorRow]],
+) -> list[DocumentRows]:
+    """Group kept rows into one document per path, under its token."""
+    rows: dict[str, list[VectorRow]] = {}
+    tokens: dict[str, RevisionToken] = {}
+    for path, token, row in kept:
+        rows.setdefault(path, []).append(row)
+        tokens[path] = token
+    return [DocumentRows(path, tokens[path], group) for path, group in rows.items()]
+
+
+def _log_progress(end: int, total: int, started: float, last_decile: int) -> int:
+    """Log a decile heartbeat with an ETA once per decile; return the decile."""
+    decile = end * 10 // total
+    if decile <= last_decile:
+        return last_decile
+    elapsed = time.monotonic() - started
+    rate = end / elapsed if elapsed > 0 else 0.0
+    remaining = (total - end) / rate if rate > 0 else 0.0
+    logger.info(
+        "build_embeddings_progress pct=%d chunks_done=%d chunks_total=%d "
+        "elapsed_s=%.0f eta_s=%.0f",
+        decile * 10,
+        end,
+        total,
+        elapsed,
+        remaining,
+    )
+    return decile
+
+
+def _float32_batch(
+    vectors: list[list[float]], dimension: int, expected: int
+) -> list[array[float]]:
+    """Pack a batch as float32, refusing what the store would refuse.
+
+    A cold build holds every row until it publishes, so rows are kept at the
+    store's precision rather than as Python floats, which cost eight times
+    the memory. The checks run on the packed values: a value too large for
+    float32 becomes infinite there.
+
+    Raises:
+        ValueError: If the count, a dimension or a value is wrong.
+    """
+    if len(vectors) != expected:
+        raise ValueError(
+            f"The provider returned {len(vectors)} vectors for {expected} texts."
+        )
+    packed: list[array[float]] = []
+    for vector in vectors:
+        if len(vector) != dimension:
+            raise ValueError(
+                f"Embedding dimension mismatch: the store holds dimension "
+                f"{dimension}, a vector has {len(vector)}."
+            )
+        row = array("f", vector)
+        if not all(math.isfinite(x) for x in row):
+            raise ValueError("Embedding values must be finite in float32.")
+        packed.append(row)
+    return packed
