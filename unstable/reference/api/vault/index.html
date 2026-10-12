@@ -3560,9 +3560,10 @@ state file. <code>False</code> is for a process that reads files another
 one owns, such as the CLI <code>search</code> reading a running server's
 index, and leaves them as they are: an on-disk index opens
 read-only and ranks with the weights stored in it (#1758), a
-search that finds the vector sidecar incompatible or corrupt
-raises :exc:<code>~markdown_vault_mcp.exceptions.VectorIndexUnusableError</code>
-instead of rebuilding it (#1734), and a pre-#1693 state file is
+search that finds the vector store incompatible or corrupt raises
+:exc:<code>~markdown_vault_mcp.exceptions.StoreIncompatibleError</code> or
+:exc:<code>~markdown_vault_mcp.exceptions.StoreCorruptError</code> instead of
+rebuilding it (#1734, #1778), and a pre-#1693 state file is
 not copied into place. An in-memory index is this process's own
 and stays writable. A library setting with no configuration knob
 behind it.</p>

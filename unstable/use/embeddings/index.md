@@ -324,7 +324,7 @@ The one addition is vendor-specific and reached only through a named provider: [
 
 Changing only the base URL is invisible to the index
 
-The embeddings files record the provider name, the model name, and how that provider embeds, and a mismatch on startup re-embeds the vault automatically. Under this recipe the first two stay `openai` and your configured model string no matter which vendor serves them, and the third is always empty, so aiming `OPENAI_BASE_URL` at a different vendor while keeping the same model name goes undetected: vectors from two different models end up in one index, and search quality degrades quietly. Force the rebuild yourself by deleting the embeddings files (the `.json` file and the `.m<N>.npy` matrix it names, at `EMBEDDINGS_PATH` or beside the index) and restarting.
+The embeddings files record the provider name, the model name, and how that provider embeds, and a mismatch on startup re-embeds the vault automatically. Under this recipe the first two stay `openai` and your configured model string no matter which vendor serves them, and the third is always empty, so aiming `OPENAI_BASE_URL` at a different vendor while keeping the same model name goes undetected: vectors from two different models end up in one index, and search quality degrades quietly. Force the rebuild yourself by deleting the embeddings files (the `.json` file, the `.m<N>.npy` matrix it names, and a plain `.npy` file of the same name that a vault upgraded from 5.x may still hold, at `EMBEDDINGS_PATH` or beside the index) and restarting.
 
 Unknown context length falls back to a 1500-character chunk cap
 

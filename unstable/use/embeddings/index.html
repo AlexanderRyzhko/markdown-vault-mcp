@@ -3636,7 +3636,8 @@ third is always empty, so aiming <code>OPENAI_BASE_URL</code> at a different ven
 while keeping the same model name goes undetected: vectors from two
 different models end up in one index, and search quality degrades
 quietly. Force the rebuild yourself by deleting the embeddings files
-(the <code>.json</code> file and the <code>.m&lt;N&gt;.npy</code> matrix it names, at
+(the <code>.json</code> file, the <code>.m&lt;N&gt;.npy</code> matrix it names, and a plain <code>.npy</code>
+file of the same name that a vault upgraded from 5.x may still hold, at
 <code>EMBEDDINGS_PATH</code> or beside the index) and restarting.</p>
 </div>
 <div class="admonition note">
