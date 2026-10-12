@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from markdown_vault_mcp.config_sections import VaultSettings
+from markdown_vault_mcp.indexing import FlushDirtyEmbeddings
 from markdown_vault_mcp.types import DocumentRows
 from markdown_vault_mcp.vault import Vault
 from tests.conftest import MockEmbeddingProvider
@@ -145,7 +146,7 @@ class TestConflictRequeue:
 
 
 class TestRetriesFromEverySite:
-    def test_a_failed_inline_embed_stays_dirty_for_the_next_flush(self, tmp_path):
+    def test_a_failed_inline_embed_is_retried_by_the_next_flush(self, tmp_path):
         class Flaky(MockEmbeddingProvider):
             fail = False
 
@@ -162,6 +163,12 @@ class TestRetriesFromEverySite:
             provider.fail = True
             (vault.source_dir / "alpha.md").write_text("# Alpha\n\nQuinces.\n")
             vault.index.reindex()
-            assert vault.index.get_index_status()["dirty_embeddings"] == 1
+            # A retry is not pending work: the vault stays drained (#1768).
+            assert vault.index.is_drained()
+            assert vault.index.get_index_status()["dirty_embeddings"] == 0
+            provider.fail = False
+            vault._coordinator.writer.submit(FlushDirtyEmbeddings()).result(5)
+            rows = metadata_by_path(vault._vectors)["alpha.md"]  # type: ignore[arg-type]
+            assert any("Quinces" in r["content"] for r in rows)
         finally:
             vault.close()

@@ -97,8 +97,8 @@ def test_failed_provider_attempt_is_retried(
     col, provider = seeded
     (col.source_dir / "note.md").write_text(_CONTENT.replace("Body", "Changed"))
     provider.fail_next = True
-    _flush(col)  # the provider fails: rows kept, the path stays dirty (#1768)
-    assert col.index.get_index_status()["dirty_embeddings"] == 1
+    _flush(col)  # the provider fails: rows kept, the path waits for a retry (#1768)
+    assert col.index.is_drained()
     _flush(col)
     assert provider.calls == 2
     _flush(col)

@@ -1354,8 +1354,10 @@ signature with the store's before calling the provider, so repeated FTS/graph
 retries reuse completed embeddings. Changed content, chunk boundaries/positions,
 titles, headings, or configured frontmatter preambles re-embed; an unchanged
 input under a new token is re-tokened without a provider call. A provider
-failure keeps the note's rows and leaves its path dirty for the next flush; a
-conflicting write is re-queued with a flush of its own. The store is checkpointed
+failure keeps the note's rows and holds its path for the next flush, without
+queueing one and without counting as pending work, so a note the provider keeps
+rejecting never leaves the writer undrained; a conflicting write is re-queued
+with a flush of its own. The store is checkpointed
 on every flush, so a failed checkpoint retries without paying the provider again.
 Store open and rebuild failures propagate, so the writer retains the snapshot.
 A note the refresh tombstoned (unparseable frontmatter, #1129) loses its vectors
@@ -4046,8 +4048,8 @@ body-less document, or one the keyword index holds no rows for when
 touching the store and publishes with `replace_document` /
 `remove_document` passing the token it observed, so a write that crosses
 another writer's returns `"conflict"`; the writer's runners re-queue
-conflicts with a flush and keep provider-failure paths dirty for the next
-one. At or above `_BULK_RETOKEN` (64) re-tokens in one pass, one
+conflicts with a flush and hold provider-failure paths for the next one,
+outside the pending work that drain status counts. At or above `_BULK_RETOKEN` (64) re-tokens in one pass, one
 `publish_generation` replaces the per-document replaces (each copies the
 whole matrix), holding every row as float32; that publish has no
 per-document token check, which the numpy store's one writer per location
