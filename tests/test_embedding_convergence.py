@@ -500,6 +500,7 @@ class TestAccessors:
                 "content",
                 "start_line",
                 "frontmatter_json",
+                "content_hash",
                 "is_first_chunk",
             }
         # is_first_chunk marks exactly the first row of each document.

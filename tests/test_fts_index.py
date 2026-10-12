@@ -1988,3 +1988,50 @@ class TestReadOnly:
     def test_in_memory_cannot_be_read_only(self) -> None:
         with pytest.raises(ValueError, match="in-memory"):
             FTSIndex(":memory:", read_only=True)
+
+
+class TestListChunksTokens:
+    """``list_chunks`` carries the embedding token and filters by path (#1768)."""
+
+    @staticmethod
+    def _index() -> FTSIndex:
+        idx = FTSIndex()
+        for path, digest in (("a.md", "hash-a"), ("b.md", "hash-b")):
+            idx.upsert_note(
+                make_note(
+                    path=path,
+                    content_hash=digest,
+                    chunks=[
+                        Chunk(
+                            heading="One", heading_level=1, content="one", start_line=0
+                        ),
+                        Chunk(
+                            heading="Two", heading_level=1, content="two", start_line=3
+                        ),
+                    ],
+                )
+            )
+        return idx
+
+    def test_each_row_carries_its_documents_content_hash(self) -> None:
+        idx = self._index()
+        rows = idx.list_chunks()
+        assert {(r["path"], r["content_hash"]) for r in rows} == {
+            ("a.md", "hash-a"),
+            ("b.md", "hash-b"),
+        }
+        idx.close()
+
+    def test_a_path_filter_returns_only_those_paths_in_order(self) -> None:
+        idx = self._index()
+        rows = idx.list_chunks(paths=["b.md"])
+        assert [(r["path"], r["content"], r["is_first_chunk"]) for r in rows] == [
+            ("b.md", "one", True),
+            ("b.md", "two", False),
+        ]
+        idx.close()
+
+    def test_an_empty_filter_returns_nothing(self) -> None:
+        idx = self._index()
+        assert idx.list_chunks(paths=[]) == []
+        idx.close()

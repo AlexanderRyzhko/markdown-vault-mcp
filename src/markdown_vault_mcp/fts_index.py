@@ -59,7 +59,7 @@ from markdown_vault_mcp.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Collection, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -2025,29 +2025,42 @@ class FTSIndex:
         return int(row[0])
 
     @_retry_on_locked
-    def list_chunks(self) -> list[dict[str, Any]]:
-        """Return every indexed chunk joined with its document metadata.
+    def list_chunks(self, paths: Collection[str] | None = None) -> list[dict[str, Any]]:
+        """Return indexed chunks joined with their document metadata.
 
         Used to converge the vector index against the FTS chunk set
         (#665): the returned rows carry exactly the shape stored as
         vector-row metadata, so callers can diff and embed without
         re-parsing source files.
 
+        Args:
+            paths: Only these documents' chunks; ``None`` for every document.
+
         Returns:
             List of dicts with keys ``path``, ``title``, ``folder``,
             ``heading`` (may be ``None``), ``content``, ``start_line``,
-            ``frontmatter_json`` (the document's stored frontmatter), and
-            ``is_first_chunk`` (``True`` on each document's first row),
+            ``frontmatter_json`` (the document's stored frontmatter),
+            ``content_hash`` (the document's, the embedding token, #1768)
+            and ``is_first_chunk`` (``True`` on each document's first row),
             ordered by document path then chunk position.
         """
+        if paths is not None and not paths:
+            return []
+        where = ""
+        params: tuple[str, ...] = ()
+        if paths is not None:
+            params = tuple(paths)
+            where = f"WHERE d.path IN ({','.join('?' * len(params))})"
         cur = self._conn().execute(
-            """
+            f"""
             SELECT d.path, d.title, d.folder, s.heading, s.content,
-                   s.start_line, d.frontmatter_json
+                   s.start_line, d.frontmatter_json, d.content_hash
             FROM sections AS s
             JOIN documents AS d ON d.id = s.document_id
+            {where}
             ORDER BY d.path, s.id
-            """
+            """,
+            params,
         )
         rows: list[dict[str, Any]] = []
         prev_path: str | None = None

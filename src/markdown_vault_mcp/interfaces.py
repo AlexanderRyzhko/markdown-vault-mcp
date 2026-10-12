@@ -37,7 +37,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Collection, Iterable, Sequence
     from pathlib import Path
 
     from markdown_vault_mcp.fts_index import ChunkingMeta
@@ -131,8 +131,12 @@ class KeywordIndex(Protocol):
         """Return the most recently modified notes, newest first."""
         ...
 
-    def list_chunks(self) -> list[dict[str, Any]]:
-        """Return every stored chunk, for embedding and reconciliation."""
+    def list_chunks(self, paths: Collection[str] | None = None) -> list[dict[str, Any]]:
+        """Return stored chunks with their document's ``content_hash``, for embedding.
+
+        Args:
+            paths: Only these documents' chunks; ``None`` for every document.
+        """
         ...
 
     def get_toc(self, path: str, *, max_level: int | None = None) -> list[TocEntry]:
