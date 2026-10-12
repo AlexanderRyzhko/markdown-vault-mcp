@@ -142,3 +142,26 @@ class TestConflictRequeue:
             assert any("Quinces" in r["content"] for r in rows)
         finally:
             vault.close()
+
+
+class TestRetriesFromEverySite:
+    def test_a_failed_inline_embed_stays_dirty_for_the_next_flush(self, tmp_path):
+        class Flaky(MockEmbeddingProvider):
+            fail = False
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                if self.fail:
+                    raise RuntimeError("provider down")
+                return super().embed(texts)
+
+        provider = Flaky()
+        vault = _vault(tmp_path, provider)
+        try:
+            vault.index.build_index()
+            vault.index.build_embeddings()
+            provider.fail = True
+            (vault.source_dir / "alpha.md").write_text("# Alpha\n\nQuinces.\n")
+            vault.index.reindex()
+            assert vault.index.get_index_status()["dirty_embeddings"] == 1
+        finally:
+            vault.close()

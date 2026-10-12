@@ -63,6 +63,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Paths bound per ``list_chunks`` statement, well under SQLite's variable
+#: limit (32766 since 3.32; 999 before), so a large dirty set never fails.
+_PATHS_PER_QUERY = 900
+
 
 # Thresholds for running FTS5 'optimize' after a bulk purge.  Deleting rows
 # from an FTS5 table only marks their tokens as deleted inside the inverted
@@ -2044,15 +2048,37 @@ class FTSIndex:
             and ``is_first_chunk`` (``True`` on each document's first row),
             ordered by document path then chunk position.
         """
-        if paths is not None and not paths:
-            return []
+        if paths is None:
+            fetched = self._chunk_rows(None)
+        else:
+            # Sorted and sliced, so no statement binds more variables than
+            # SQLite allows and the slices concatenate in path order.
+            ordered = sorted(set(paths))
+            fetched = [
+                raw
+                for start in range(0, len(ordered), _PATHS_PER_QUERY)
+                for raw in self._chunk_rows(ordered[start : start + _PATHS_PER_QUERY])
+            ]
+        rows: list[dict[str, Any]] = []
+        prev_path: str | None = None
+        for raw in fetched:
+            row = dict(raw)
+            row["is_first_chunk"] = row["path"] != prev_path
+            prev_path = row["path"]
+            rows.append(row)
+        return rows
+
+    def _chunk_rows(self, paths: list[str] | None) -> list[sqlite3.Row]:
+        """Fetch the chunk rows of *paths* (or of every document), in path order."""
         where = ""
         params: tuple[str, ...] = ()
         if paths is not None:
             params = tuple(paths)
             where = f"WHERE d.path IN ({','.join('?' * len(params))})"
-        cur = self._conn().execute(
-            f"""
+        return (
+            self._conn()
+            .execute(
+                f"""
             SELECT d.path, d.title, d.folder, s.heading, s.content,
                    s.start_line, d.frontmatter_json, d.content_hash
             FROM sections AS s
@@ -2060,16 +2086,10 @@ class FTSIndex:
             {where}
             ORDER BY d.path, s.id
             """,
-            params,
+                params,
+            )
+            .fetchall()
         )
-        rows: list[dict[str, Any]] = []
-        prev_path: str | None = None
-        for raw in cur.fetchall():
-            row = dict(raw)
-            row["is_first_chunk"] = row["path"] != prev_path
-            prev_path = row["path"]
-            rows.append(row)
-        return rows
 
     @_retry_on_locked
     def get_toc(self, path: str, *, max_level: int | None = None) -> list[TocEntry]:

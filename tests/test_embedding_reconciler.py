@@ -264,3 +264,47 @@ class TestRebuild:
         result = rec.reconcile(store, site="test")
         assert result.embedded == 2
         assert len(provider.texts) == 2
+
+
+class TestBulkRetokenMemory:
+    def test_the_bulk_publish_holds_vectors_as_float32(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from array import array
+
+        import markdown_vault_mcp.indexing.embedding_reconciler as module
+
+        monkeypatch.setattr(module, "_BULK_RETOKEN", 2)
+        _fts, _provider, store, rec = _setup(tmp_path, NOTES)
+        rec.reconcile(store, site="test")
+        store.publish_generation(
+            store.identity,
+            [DocumentRows(p, None, store.rows_for(p)) for p in sorted(store.tokens())],
+        )
+        published: list[DocumentRows] = []
+        real = store.publish_generation
+
+        def capture(identity, documents):  # type: ignore[no-untyped-def]
+            docs = list(documents)
+            published.extend(docs)
+            return real(identity, docs)
+
+        monkeypatch.setattr(store, "publish_generation", capture)
+        rec.reconcile(store, site="test")
+        vectors = [row.vector for doc in published for row in doc.rows]
+        assert vectors
+        assert all(isinstance(v, array) and v.typecode == "f" for v in vectors)
+
+
+class TestRetries:
+    def test_a_provider_failure_reports_the_path_for_a_retry(self, tmp_path):
+        fts, provider, store, rec = _setup(tmp_path, NOTES)
+        rec.reconcile(store, site="test")
+        (tmp_path / "a.md").write_text("# A\n\nQuinces.\n")
+        fts.upsert_note(parse_note(tmp_path / "a.md", tmp_path, HeadingChunker()))
+
+        def down(_texts: list[str]) -> list[list[float]]:
+            raise RuntimeError("provider down")
+
+        provider.embed = down  # type: ignore[method-assign]
+        assert rec.reconcile(store, site="test").retry == {"a.md"}

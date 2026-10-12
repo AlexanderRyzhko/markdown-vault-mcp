@@ -317,6 +317,7 @@ class EmbeddingsManager:
             return _EMBED_OK
         result = self._reconciler.reconcile(vectors, [note.path], site="reindex")
         self._conflicts |= result.conflicts
+        self._retries |= result.retry
         return _EMBED_KEPT if result.kept else _EMBED_OK
 
     # ------------------------------------------------------------------
@@ -433,6 +434,7 @@ class EmbeddingsManager:
             )
         result = self._reconciler.reconcile(vectors, site="converge")
         self._conflicts |= result.conflicts
+        self._retries |= result.retry
         if result.embedded or result.removed or result.retokened:
             vectors.checkpoint()
         if result.kept:
@@ -547,7 +549,7 @@ class EmbeddingsManager:
         logger.debug("deferred_embeddings_flushed paths=%d", len(paths))
 
     def take_embedding_retries(self) -> set[str]:
-        """Return and forget the flushed paths the provider failed for.
+        """Return and forget the paths the provider failed for, at any site.
 
         Their rows were kept; the writer keeps them dirty so the next flush
         retries them, without queueing one of its own (#1464, #1768).

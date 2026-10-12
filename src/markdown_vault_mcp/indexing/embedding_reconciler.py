@@ -211,7 +211,7 @@ class EmbeddingReconciler:
         self._remove_unbacked(state, sorted(held - set(docs)))
         retoken: list[_Document] = []
         for path in sorted(docs):
-            if self._needs_retoken(state, docs[path]):
+            if self._reconcile_document(state, docs[path]):
                 retoken.append(docs[path])
         self._retoken(state, retoken)
         return state.result
@@ -234,8 +234,12 @@ class EmbeddingReconciler:
             return
         state.result.removed += removed
 
-    def _needs_retoken(self, state: _Pass, doc: _Document) -> bool:
-        """Decide *doc*'s case and act on it; return whether it needs a re-token."""
+    def _reconcile_document(self, state: _Pass, doc: _Document) -> bool:
+        """Remove, embed or keep *doc*; return whether a re-token is pending.
+
+        A re-token is returned rather than written, so the pass can write
+        them together (:meth:`_retoken`).
+        """
         current = [dict(r.metadata) for r in state.store.rows_for(doc.path)]
         if not doc.texts:
             if current:
@@ -325,7 +329,7 @@ class EmbeddingReconciler:
             state.store.identity,
             [
                 DocumentRows(
-                    path, new_tokens.get(path, token), state.store.rows_for(path)
+                    path, new_tokens.get(path, token), _float32_rows(state.store, path)
                 )
                 for path, token in state.store.tokens().items()
             ],
@@ -420,6 +424,15 @@ class EmbeddingReconciler:
         """Record that another writer changed *path* underneath this pass."""
         state.result.conflicts.add(path)
         logger.info("embedding_reconcile_conflict site=%s path=%s", state.site, path)
+
+
+def _float32_rows(store: EmbeddingStore, path: str) -> list[VectorRow]:
+    """*path*'s stored rows with their vectors packed as float32.
+
+    A bulk publish holds every row of the store at once; as Python floats
+    that is about ten times the matrix (#1768).
+    """
+    return [VectorRow(array("f", r.vector), r.metadata) for r in store.rows_for(path)]
 
 
 def _group(

@@ -2035,3 +2035,13 @@ class TestListChunksTokens:
         idx = self._index()
         assert idx.list_chunks(paths=[]) == []
         idx.close()
+
+
+class TestListChunksManyPaths:
+    def test_more_paths_than_sqlite_binds_in_one_statement(self) -> None:
+        idx = FTSIndex()
+        idx.upsert_note(make_note(path="real.md", content_hash="h"))
+        paths = [f"missing-{i}.md" for i in range(40_000)] + ["real.md"]
+        rows = idx.list_chunks(paths=paths)
+        assert [r["path"] for r in rows] == ["real.md"]
+        idx.close()
