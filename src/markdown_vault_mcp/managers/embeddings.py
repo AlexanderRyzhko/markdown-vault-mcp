@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     from markdown_vault_mcp.interfaces import EmbeddingStore, KeywordIndex
     from markdown_vault_mcp.managers._vector_slot import VectorStoreSlot
     from markdown_vault_mcp.providers import EmbeddingProvider
-    from markdown_vault_mcp.scanner import ChunkStrategy
     from markdown_vault_mcp.types import ParsedNote
 
 logger = logging.getLogger(__name__)
@@ -65,9 +64,6 @@ class EmbeddingsManager:
         embeddings_path: Base path for ``.npy`` / ``.json`` sidecar files.
             ``None`` keeps the vectors in memory (#1708).
         embedding_provider: Provider used to generate embeddings.
-        chunk_strategy: Strategy for splitting documents into chunks.
-        title_field: Frontmatter key consulted first when resolving document
-            titles; threaded to every ``parse_note`` call.
         embed_text_builder: Shared
             :class:`~markdown_vault_mcp.embed_text.EmbedTextBuilder` used at
             every embedding site so hot, cold, converge, and flush paths all
@@ -94,8 +90,6 @@ class EmbeddingsManager:
         source_dir: Path,
         embeddings_path: Path | None,
         embedding_provider: EmbeddingProvider | None,
-        chunk_strategy: ChunkStrategy,
-        title_field: str,
         embed_text_builder: EmbedTextBuilder,
         embedding_batch_size: int = _EMBEDDING_BATCH_SIZE,
         is_path_excluded: Callable[[str], bool],
@@ -106,8 +100,6 @@ class EmbeddingsManager:
         self._source_dir = source_dir
         self._embeddings_path = embeddings_path
         self._embedding_provider = embedding_provider
-        self._chunk_strategy = chunk_strategy
-        self._title_field = title_field
         self._embed_builder = embed_text_builder
         self._embedding_batch_size = embedding_batch_size
         self._is_path_excluded = is_path_excluded
@@ -167,7 +159,7 @@ class EmbeddingsManager:
         """Return whether an empty FTS-derived embedding build is complete.
 
         A forced FTS rebuild can omit a source that failed parsing, leaving no
-        row for :meth:`build_embeddings` to re-parse. Before replacing an old
+        row for :meth:`build_embeddings` to embed. Before replacing an old
         sidecar with an empty one, inspect only source candidates absent from
         FTS: since #1129, every deliberate skip (any surfaced category) leaves
         a tombstone row, so a candidate is accounted for iff it has one — no

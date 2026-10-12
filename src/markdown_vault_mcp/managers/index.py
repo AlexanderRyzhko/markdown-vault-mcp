@@ -174,8 +174,6 @@ class IndexManager:
             source_dir=source_dir,
             embeddings_path=embeddings_path,
             embedding_provider=embedding_provider,
-            chunk_strategy=chunk_strategy,
-            title_field=title_field,
             embed_text_builder=self._embed_builder,
             embedding_batch_size=embedding_batch_size,
             is_path_excluded=self._is_path_excluded,
@@ -1112,12 +1110,12 @@ class IndexManager:
             return
 
     def flush_dirty_embeddings(self, paths: set[str]) -> None:
-        """Re-embed each path in the snapshot and save the vector index once.
+        """Reconcile each path's vectors with its keyword rows and checkpoint once.
 
         Called only by the IndexWriter's ``FlushDirtyEmbeddings`` runner.
         Thin delegation to
         :meth:`~markdown_vault_mcp.managers.embeddings.EmbeddingsManager.flush_dirty_embeddings`
-        (#1157); see there for the two-phase parse/mutate contract.
+        (#1157, #1768); see there for the contract.
 
         Args:
             paths: Paths to re-embed (relative to source_dir).
