@@ -370,14 +370,40 @@ def run_build_index(job: BuildIndex, ctx: WriterContext) -> Any:
     return ctx.index_manager.build_index(force=job.force)
 
 
+def _requeue_conflicts(ctx: WriterContext) -> None:
+    """Send back the documents a vector write left behind (#1768).
+
+    A conflicting write gets another flush now; a document the provider
+    failed for stays dirty for the next flush, without queueing one, so a
+    provider that is down does not spin the writer.
+    """
+    if ctx.writer is None:
+        return
+    retries = getattr(ctx.index_manager, "take_embedding_retries", None)
+    retry = retries() if retries is not None else set()
+    if retry:
+        ctx.writer.mark_embedding_dirty(retry)
+    take = getattr(ctx.index_manager, "take_embedding_conflicts", None)
+    conflicts = take() if take is not None else set()
+    if conflicts:
+        ctx.writer.mark_embedding_dirty(conflicts)
+        ctx.writer.submit(FlushDirtyEmbeddings())
+
+
 def run_reindex_all(job: ReindexAll, ctx: WriterContext) -> Any:  # noqa: ARG001
     """Execute an incremental FTS reindex via the change tracker."""
-    return ctx.index_manager.reindex()
+    try:
+        return ctx.index_manager.reindex()
+    finally:
+        _requeue_conflicts(ctx)
 
 
 def run_build_embeddings(job: BuildEmbeddings, ctx: WriterContext) -> Any:
     """Execute a full vector index build."""
-    return ctx.index_manager.build_embeddings(force=job.force)
+    try:
+        return ctx.index_manager.build_embeddings(force=job.force)
+    finally:
+        _requeue_conflicts(ctx)
 
 
 def run_process_dirty_paths(
@@ -424,3 +450,5 @@ def run_flush_dirty_embeddings(
         # silently drop the drained set.
         ctx.writer.mark_embedding_dirty(snapshot)
         raise
+    finally:
+        _requeue_conflicts(ctx)

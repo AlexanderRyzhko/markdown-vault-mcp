@@ -56,7 +56,9 @@ class ReconcileResult:
             refused a vector.
         up_to_date: Chunks already converged.
         conflicts: Paths another writer changed underneath; the caller
-            re-queues them.
+            re-queues them for another flush.
+        retry: Paths the provider failed for; their rows stay, and the
+            caller keeps them dirty for the next flush.
     """
 
     embedded: int = 0
@@ -65,6 +67,7 @@ class ReconcileResult:
     kept: int = 0
     up_to_date: int = 0
     conflicts: set[str] = field(default_factory=set)
+    retry: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -254,6 +257,7 @@ class EmbeddingReconciler:
             # Broad by design: providers raise heterogeneous types for a
             # timeout, an oversized batch or an outage. The rows stay.
             state.result.kept += len(doc.texts)
+            state.result.retry.add(doc.path)
             logger.warning(
                 "embedding_reconcile_skip_doc site=%s path=%s chunks=%d err=%s",
                 state.site,

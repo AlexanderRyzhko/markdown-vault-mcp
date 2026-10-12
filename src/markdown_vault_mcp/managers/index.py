@@ -882,6 +882,22 @@ class IndexManager:
     # Embeddings
     # ------------------------------------------------------------------
 
+    def take_embedding_retries(self) -> set[str]:
+        """Return and forget the flushed paths the embedding provider failed for.
+
+        Returns:
+            The paths to keep dirty for the next flush.
+        """
+        return self._embeddings.take_embedding_retries()
+
+    def take_embedding_conflicts(self) -> set[str]:
+        """Return and forget the paths a conflicting vector write sent back (#1768).
+
+        Returns:
+            The paths to re-queue for another embedding flush.
+        """
+        return self._embeddings.take_embedding_conflicts()
+
     def build_embeddings(self, *, force: bool = False) -> int:
         """Build or converge the vector index against the FTS index.
 

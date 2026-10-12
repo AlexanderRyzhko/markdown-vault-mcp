@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 from markdown_vault_mcp.fts_index import FTSIndex
 from markdown_vault_mcp.managers.index import IndexManager
 from markdown_vault_mcp.providers import EmbeddingProvider
-from markdown_vault_mcp.scanner import HeadingChunker
+from markdown_vault_mcp.scanner import HeadingChunker, parse_note
 from markdown_vault_mcp.stores.numpy_sidecar import NumpySidecarBackend
 from markdown_vault_mcp.tracker import ChangeTracker
 from markdown_vault_mcp.types import (
@@ -756,7 +756,6 @@ class TestSkipStateMemory:
         vectors for the path and report success (0 failures) without
         calling the provider.
         """
-        from markdown_vault_mcp.types import ParsedNote
 
         mgr, holder = self._mgr_with_embeddings(index_vault, tmp_path)
         mgr.build_index()
@@ -765,15 +764,10 @@ class TestSkipStateMemory:
         assert vectors is not None
         assert "alpha.md" in metadata_by_path(vectors)
 
-        # A parsed note with no embeddable chunks.
-        note = ParsedNote(
-            path="alpha.md",
-            frontmatter={},
-            title="Alpha",
-            chunks=[],
-            content_hash="deadbeef",
-            modified_at=0.0,
-        )
+        # The note becomes body-less; reindex writes its rows, then embeds.
+        (index_vault / "alpha.md").write_text("---\ntitle: Alpha\n---\n")
+        note = parse_note(index_vault / "alpha.md", index_vault, HeadingChunker())
+        mgr._fts.upsert_note(note)
         failed = mgr._embed_note_inline(vectors, note)
 
         assert failed == 0
@@ -972,7 +966,7 @@ class TestBuildEmbeddings:
         )
         mgr.build_index()
         with caplog.at_level(
-            logging.DEBUG, logger="markdown_vault_mcp.managers.embeddings"
+            logging.DEBUG, logger="markdown_vault_mcp.indexing.embedding_reconciler"
         ):
             total = mgr.build_embeddings()
         assert total >= 40  # many chunks => many batches
@@ -1071,17 +1065,16 @@ class TestBuildEmbeddings:
         with caplog.at_level(
             logging.WARNING, logger="markdown_vault_mcp.managers.index"
         ):
-            # force=True drives the cold-build parse loop that re-parses FTS rows
-            # from disk. Today this raises yaml.YAMLError and aborts.
+            # The cold build reads the keyword index, not the file (#1768):
+            # bad.md is embedded with the content it was indexed with.
             count = mgr.build_embeddings(force=True)
 
-        # The run did not abort, and the good note's chunks were embedded.
-        assert count >= 1
-        # The malformed file was skipped with a warning naming it.
-        assert any(
-            "build_embeddings_skip_note" in r.getMessage()
-            and "bad.md" in r.getMessage()
-            for r in caplog.records
+        assert count >= 2
+        store = mgr._embeddings._loaded_store()
+        assert store is not None
+        assert {"good.md", "bad.md"} <= set(metadata_by_path(store))
+        assert not any(
+            "build_embeddings_skip_note" in r.getMessage() for r in caplog.records
         )
 
     def test_force_rebuild_persists_empty_only_after_successful_parse(
@@ -1106,10 +1099,10 @@ class TestBuildEmbeddings:
         assert mgr.build_embeddings() == 1
         assert _stored(embeddings_path, provider).count == 1
 
-        # An unreadable source is not authoritative while its live FTS row
-        # still exists: the re-parse fails, so keep its last good vector.
+        # A source broken after indexing: the cold build embeds what the
+        # keyword index still holds, its last good row (#1768).
         note.write_text("---\ntitle: [unclosed\n---\nbody", encoding="utf-8")
-        assert mgr.build_embeddings(force=True) == 0
+        assert mgr.build_embeddings(force=True) == 1
         assert _stored(embeddings_path, provider).count == 1
 
         # A forced FTS rebuild tombstones the malformed source (#1129).
@@ -1844,44 +1837,42 @@ class TestFlushDirtyEmbeddingsWithSnapshot:
         assert "alpha.md" in paths_with_vectors
         assert "_conventions.md" not in paths_with_vectors
 
-    def test_parse_failure_preserves_existing_vectors(
+    def test_an_unreadable_file_keeps_its_vectors(
         self, index_vault, tmp_path, monkeypatch
     ):
-        """A parse failure for one path must NOT delete its existing vectors (#559)."""
+        """An unreadable file is never refreshed, so its vectors stay (#559, #1768).
+
+        The refresh raises and keeps the path for a retry; the flush reads
+        the keyword index, which still holds the last good rows.
+        """
+        from markdown_vault_mcp.managers import index as _index_mod
         from tests.conftest import MockEmbeddingProvider
 
         provider = MockEmbeddingProvider()
-        embeddings_path = tmp_path / "embeddings"
         mgr, _, vectors_holder = _make_index_mgr(
             index_vault,
             tmp_path,
-            embeddings_path=embeddings_path,
+            embeddings_path=tmp_path / "embeddings",
             embedding_provider=provider,
         )
         mgr.build_index()
-        # Seed vectors for alpha.md via a successful flush first.
         mgr.flush_dirty_embeddings({"alpha.md"})
         vectors = vectors_holder["vectors"]
         assert vectors is not None
         alpha_before = [m for m in _all_metadata(vectors) if m["path"] == "alpha.md"]
         assert alpha_before, "fixture should produce alpha.md vectors on first flush"
 
-        # Now monkeypatch parse_note to raise for any path so the next flush
-        # encounters a parse failure for alpha.md.
-        from markdown_vault_mcp.managers import embeddings as _emb_mod
-
         def _boom(*_a, **_kw):
-            msg = "synthetic parse failure"
+            msg = "synthetic read failure"
             raise OSError(msg)
 
-        monkeypatch.setattr(_emb_mod, "parse_note", _boom)
+        monkeypatch.setattr(_index_mod, "parse_note", _boom)
+        with pytest.raises(OSError, match="synthetic"):
+            mgr.process_dirty_paths({"alpha.md"})
         mgr.flush_dirty_embeddings({"alpha.md"})
 
-        # Vectors for alpha.md must still be present.
         alpha_after = [m for m in _all_metadata(vectors) if m["path"] == "alpha.md"]
-        assert alpha_after == alpha_before, (
-            "parse failure must not delete existing vectors for the path"
-        )
+        assert alpha_after == alpha_before
 
 
 # ---------------------------------------------------------------------------
@@ -2292,6 +2283,7 @@ class TestEmbedTextEnrichment:
             note_path.read_text().replace("A crisp summary.", "Updated summary."),
             encoding="utf-8",
         )
+        mgr.process_dirty_paths({"doc.md"})  # rows come from the keyword index
         mgr.flush_dirty_embeddings({"doc.md"})
         assert provider.texts == [
             "Enriched Doc\nUpdated summary.\n\n# Enriched Doc\n\nplain chunk body"
@@ -2361,6 +2353,7 @@ class TestEmbeddingBatchSize:
             content_hash="deadbeef",
             modified_at=0.0,
         )
+        mgr._fts.upsert_note(note)  # reindex writes the rows before embedding
         failed = mgr._embed_note_inline(vectors, note)
 
         assert failed == 0
