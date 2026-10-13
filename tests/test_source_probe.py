@@ -77,3 +77,21 @@ def test_a_name_that_only_matches_case_insensitively_is_absent(
     monkeypatch.setattr(_Path, "stat", case_insensitive_stat)
     assert FileSourceProbe(tmp_path).probe("Foo.md").status == "absent"
     assert FileSourceProbe(tmp_path).probe("foo.md").status == "present"
+
+
+def test_a_directory_that_only_matches_case_insensitively_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A folder renamed "Notes" → "notes" leaves "Notes/a.md" statable (#1785)."""
+    from pathlib import Path as _Path
+
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "a.md").write_text("# A\n")
+    real_stat = _Path.stat
+
+    def case_insensitive_stat(self: _Path, **kw: object):  # type: ignore[no-untyped-def]
+        return real_stat(_Path(str(self).replace("/Notes/", "/notes/")), **kw)
+
+    monkeypatch.setattr(_Path, "stat", case_insensitive_stat)
+    assert FileSourceProbe(tmp_path).probe("Notes/a.md").status == "absent"
+    assert FileSourceProbe(tmp_path).probe("notes/a.md").status == "present"

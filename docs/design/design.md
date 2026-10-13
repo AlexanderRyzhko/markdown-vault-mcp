@@ -959,10 +959,12 @@ tokens (the store's `tokens()` and `rows_for()`) and reconciles:
   when the absence is **authoritative** (#1130, #1785). A tombstone (a
   deliberate skip, #1129) or an exclusion removes them; otherwise the
   `SourceProbe` decides (the file-backed `FileSourceProbe`: a `stat`
-  classified by errno, with the exact name confirmed in its directory so a
-  case-only rename on a case-insensitive file system reads as absent).
-  *Absent* removes; *unavailable* — a refused stat, or a source root that is
-  not a statable directory — keeps them, logged once per pass
+  classified by errno, with every path component confirmed under its exact
+  name in its directory listing, so a case-only rename of a note or a
+  folder on a case-insensitive file system reads as absent). *Absent*
+  removes; *unavailable* — a refused stat or read, or a source root that is
+  not a statable directory (the root check lives in the probe, not the
+  embedding path) — keeps them, logged once per pass
   (`embedding_reconcile_source_unavailable`); *present* is a keyword-index
   gap and keeps them, logged per path (`embedding_reconcile_kept`). A
   body-less note that still has FTS chunk rows reclaims without asking.

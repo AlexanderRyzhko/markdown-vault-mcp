@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import stat as stat_module
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from markdown_vault_mcp.hashing import compute_file_hash
@@ -53,7 +54,7 @@ class FileSourceProbe:
         except OSError as exc:
             logger.debug("source_probe_stat_refused path=%s err=%s", path, exc)
             return SourceState("unavailable")
-        if not stat_module.S_ISREG(st.st_mode) or not self._named_exactly(target):
+        if not stat_module.S_ISREG(st.st_mode) or not self._named_exactly(path):
             return SourceState("absent")
         try:
             return SourceState("present", compute_file_hash(target))
@@ -61,18 +62,24 @@ class FileSourceProbe:
             logger.debug("source_probe_read_refused path=%s err=%s", path, exc)
             return SourceState("unavailable")
 
-    @staticmethod
-    def _named_exactly(target: Path) -> bool:
-        """Whether *target*'s directory lists its exact name.
+    def _named_exactly(self, path: str) -> bool:
+        """Whether every component of *path* is listed under its exact name.
 
-        On a case-insensitive file system a stat of ``Foo.md`` succeeds for a
-        file renamed to ``foo.md``; only the listing tells the old name is
-        gone, so its vectors are not kept as a keyword gap (#1785).
+        On a case-insensitive file system a stat of ``Notes/Foo.md`` succeeds
+        after ``Notes/`` became ``notes/`` or ``Foo.md`` became ``foo.md``;
+        only the listings tell the old name is gone, so its vectors are not
+        kept as a keyword gap (#1785). One listing per component, and the
+        probe only sees paths the keyword index holds no rows for.
         """
-        try:
-            return any(entry.name == target.name for entry in target.parent.iterdir())
-        except OSError:
-            return True  # the stat succeeded: do not turn a listing error into absent
+        current = self._source_dir
+        for part in PurePosixPath(path).parts:
+            try:
+                if not any(entry.name == part for entry in current.iterdir()):
+                    return False
+            except OSError:
+                return True  # the stat succeeded: a listing error is not absence
+            current = current / part
+        return True
 
     def _root_available(self) -> bool:
         try:
