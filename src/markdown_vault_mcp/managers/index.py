@@ -35,7 +35,6 @@ from markdown_vault_mcp.scanner import (
     scan_directory,
 )
 from markdown_vault_mcp.types import (
-    ANY_TOKEN,
     IndexStats,
     ParsedNote,
     ReindexResult,
@@ -426,13 +425,12 @@ class IndexManager:
                 # another model): the keyword purge still runs (#1778).
                 logger.warning("purge_vectors_skipped reason=store_refused err=%s", exc)
 
-        purged = 0
         for stale_path in stale_paths:
             self._fts.delete_by_path(stale_path)
-            if vectors is not None:
-                vectors.remove_document(stale_path, expected_token=ANY_TOKEN)
-            purged += 1
-        return purged, vectors
+        if vectors is not None and stale_paths:
+            # The reconciler removes each with the token it observes (#1785).
+            self._embeddings.reconcile_paths(vectors, stale_paths, site="purge")
+        return len(stale_paths), vectors
 
     # ------------------------------------------------------------------
     # Index building
@@ -665,8 +663,8 @@ class IndexManager:
         deleted_purged = 0
         for path in changes.deleted:
             deleted_purged += self._fts.delete_by_path(path)
-            if vectors is not None:
-                vectors.remove_document(path, expected_token=ANY_TOKEN)
+        if vectors is not None and changes.deleted:
+            self._embeddings.reconcile_paths(vectors, changes.deleted, site="purge")
 
         # Purge stale excluded docs (issue #255); the shared helper defers
         # the vector-sidecar load until stale rows are confirmed, keeping
@@ -715,7 +713,7 @@ class IndexManager:
         # stale-excluded entries touches no vectors, so re-serialising the
         # whole index to disk every run is pure churn — particularly under a
         # file watcher that may fire reindex repeatedly (#720). ``stale_excluded``
-        # must be included: purging excluded docs calls ``vectors.remove_document``
+        # must be included: purging excluded docs removes their vectors
         # above, mutating the in-memory index even when the file diff is empty.
         vector_index_changed = bool(
             indexed_added or indexed_modified or changes.deleted or stale_excluded

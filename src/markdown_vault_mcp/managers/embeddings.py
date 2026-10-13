@@ -19,12 +19,15 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from markdown_vault_mcp.exceptions import EmbeddingsNotConfiguredError
-from markdown_vault_mcp.indexing.embedding_reconciler import EmbeddingReconciler
+from markdown_vault_mcp.indexing.embedding_reconciler import (
+    EmbeddingReconciler,
+    ReconcileResult,
+)
 from markdown_vault_mcp.source_probe import FileSourceProbe
 from markdown_vault_mcp.utils.fs import path_exists
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection
     from pathlib import Path
 
     from markdown_vault_mcp.embed_text import EmbedTextBuilder
@@ -435,6 +438,30 @@ class EmbeddingsManager:
         # have failed after the rows were published, and this retry persists them.
         vectors.checkpoint()
         logger.debug("deferred_embeddings_flushed paths=%d", len(paths))
+
+    def reconcile_paths(
+        self, vectors: EmbeddingStore, paths: Collection[str], *, site: str
+    ) -> ReconcileResult:
+        """Reconcile *paths* in *vectors* with the keyword index (#1785).
+
+        Used by the purge loops after they delete keyword rows: a path left
+        with no rows loses its vectors on a tombstone, an exclusion or an
+        absent source, with the token observed.
+
+        Args:
+            vectors: The store to write.
+            paths: The paths to reconcile.
+            site: Which caller, for the log lines.
+
+        Returns:
+            What the pass did; conflicts and retries are also recorded here.
+        """
+        if self._reconciler is None:
+            return ReconcileResult()
+        result = self._reconciler.reconcile(vectors, paths, site=site)
+        self._conflicts |= result.conflicts
+        self._retries |= result.retry
+        return result
 
     def take_embedding_retries(self) -> set[str]:
         """Return and forget the paths the provider failed for, at any site.
