@@ -474,7 +474,7 @@ def test_async_build_set_completed_failure_records_failed_status(
     coord = make_coordinator(tmp_path)
     try:
 
-        def _boom() -> None:
+        def _boom(**_kwargs: bool) -> None:
             raise RuntimeError("sentinel boom")
 
         coord._fts.set_build_completed = _boom  # type: ignore[method-assign]
@@ -498,7 +498,7 @@ def test_sync_build_set_completed_failure_records_failed_status(
     coord = make_coordinator(tmp_path)
     try:
 
-        def _boom() -> None:
+        def _boom(**_kwargs: bool) -> None:
             raise RuntimeError("sync sentinel boom")
 
         coord._fts.set_build_completed = _boom  # type: ignore[method-assign]
@@ -547,7 +547,7 @@ def test_async_set_completed_base_exception_does_not_strand(
     coord = make_coordinator(tmp_path)
     try:
 
-        def _boom() -> None:
+        def _boom(**_kwargs: bool) -> None:
             raise _BaseBoom("base sentinel boom")
 
         coord._fts.set_build_completed = _boom  # type: ignore[method-assign]
@@ -867,7 +867,7 @@ def test_build_index_set_completed_baseexception_does_not_strand(
     coord = make_coordinator(tmp_path)
     try:
 
-        def _boom() -> None:
+        def _boom(**_kwargs: bool) -> None:
             raise _BaseBoom("sync set_completed base boom")
 
         coord._fts.set_build_completed = _boom  # type: ignore[method-assign]
