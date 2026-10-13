@@ -1,4 +1,4 @@
-"""A keyword build whose walk was incomplete withholds its sentinel (#1785)."""
+"""A keyword build whose walk was incomplete says so (#1785)."""
 
 from __future__ import annotations
 
@@ -31,11 +31,12 @@ def test_a_complete_walk_sets_the_sentinel(tmp_path: Path) -> None:
         stats = vault.index.build_index(force=True)
         assert stats.walk_complete
         assert vault._fts.is_build_completed()
+        assert vault._fts.is_build_walk_complete()
     finally:
         vault.close()
 
 
-def test_an_incomplete_walk_withholds_it_and_search_still_works(tmp_path: Path) -> None:
+def test_an_incomplete_walk_is_recorded_and_search_still_works(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     shut = tmp_path / "vault" / "shut"
     shut.mkdir()
@@ -44,10 +45,43 @@ def test_an_incomplete_walk_withholds_it_and_search_still_works(tmp_path: Path) 
     try:
         stats = vault.index.build_index(force=True)
         assert not stats.walk_complete
-        assert not vault._fts.is_build_completed()
+        # The build completed (warm restarts stay warm) but read not everything.
+        assert vault._fts.is_build_completed()
+        assert not vault._fts.is_build_walk_complete()
         assert [r.path for r in vault.reader.search("body", mode="keyword")] == [
             "ok.md"
         ]
     finally:
         shut.chmod(0o755)
         vault.close()
+
+
+def test_an_unreadable_directory_does_not_hide_offline_deletions(
+    tmp_path: Path,
+) -> None:
+    """A permanently unreadable dir (lost+found) must not stop warm restarts.
+
+    Withholding the build sentinel made every boot a non-forced cold build,
+    which purges nothing and rewrote the tracker without the deleted note.
+    """
+    root = tmp_path / "vault"
+    root.mkdir()
+    (root / "a.md").write_text("# A\n\napples\n")
+    (root / "b.md").write_text("# B\n\nboats\n")
+    lost = root / "lost+found"
+    lost.mkdir()
+    lost.chmod(0)
+    try:
+        vault = _vault(tmp_path)
+        vault.index.build_index()
+        vault.close()
+        (root / "b.md").unlink()
+        vault = _vault(tmp_path)
+        try:
+            vault.index.build_index()
+            vault.index.reindex()
+            assert "b.md" not in {r["path"] for r in vault._fts.list_notes()}
+        finally:
+            vault.close()
+    finally:
+        lost.chmod(0o755)

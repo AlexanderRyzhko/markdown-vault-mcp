@@ -171,12 +171,12 @@ class BuildLifecycle:
             self._fts.clear_build_completed()
             stats: IndexStats = run_build_index(job, ctx)
             scanning = False
-            if getattr(stats, "walk_complete", True):
-                self._fts.set_build_completed()
-            else:
-                # The scan missed what it could not read: the index is usable
-                # but not complete, so no empty cold build may trust it (#1785).
-                logger.warning("build_index_sentinel_withheld reason=walk_incomplete")
+            self._fts.set_build_completed(walk_complete=stats.walk_complete)
+            if not stats.walk_complete:
+                # The build completed: warm restarts stay warm (the tracker
+                # keeps unwalked subtrees). It is recorded as incomplete so no
+                # empty cold build trusts it (#1785).
+                logger.warning("build_index_recorded_incomplete reason=walk_errors")
         except CancelledError as exc:
             self._finish(attempt, _Unsuccessful("cancelled", exc))
             raise

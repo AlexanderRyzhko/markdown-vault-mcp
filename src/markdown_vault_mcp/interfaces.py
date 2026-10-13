@@ -213,8 +213,12 @@ class KeywordIndex(Protocol):
         """Return whether a full build has finished against this index."""
         ...
 
-    def set_build_completed(self) -> None:
-        """Mark the full build as finished."""
+    def set_build_completed(self, *, walk_complete: bool = True) -> None:
+        """Mark the full build as finished, and whether it read every directory."""
+        ...
+
+    def is_build_walk_complete(self) -> bool:
+        """Return whether the last completed build read every directory (#1785)."""
         ...
 
     def clear_build_completed(self) -> None:

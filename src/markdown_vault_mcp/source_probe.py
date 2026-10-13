@@ -3,7 +3,7 @@
 A ``stat`` classified by errno, as the spec's ``SourceProbe`` says: a path
 that does not exist, or names something that is not a regular file, is
 *absent*; a stat the file system refuses is *unavailable*, as is any path
-under a source root that is not a readable directory (an unmounted volume
+under a source root that is not a statable directory (an unmounted volume
 must remove nothing). *Present* carries the file's content hash, the
 keyword index's token, so it reads the file; the deletion rule only asks
 about paths the keyword index holds no rows for.
@@ -53,13 +53,26 @@ class FileSourceProbe:
         except OSError as exc:
             logger.debug("source_probe_stat_refused path=%s err=%s", path, exc)
             return SourceState("unavailable")
-        if not stat_module.S_ISREG(st.st_mode):
+        if not stat_module.S_ISREG(st.st_mode) or not self._named_exactly(target):
             return SourceState("absent")
         try:
             return SourceState("present", compute_file_hash(target))
         except OSError as exc:
             logger.debug("source_probe_read_refused path=%s err=%s", path, exc)
             return SourceState("unavailable")
+
+    @staticmethod
+    def _named_exactly(target: Path) -> bool:
+        """Whether *target*'s directory lists its exact name.
+
+        On a case-insensitive file system a stat of ``Foo.md`` succeeds for a
+        file renamed to ``foo.md``; only the listing tells the old name is
+        gone, so its vectors are not kept as a keyword gap (#1785).
+        """
+        try:
+            return any(entry.name == target.name for entry in target.parent.iterdir())
+        except OSError:
+            return True  # the stat succeeded: do not turn a listing error into absent
 
     def _root_available(self) -> bool:
         try:

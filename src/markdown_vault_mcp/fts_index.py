@@ -224,6 +224,10 @@ _DELETE_NOTES_FTS_BY_DOCUMENT_SQL = (
 # by a crash mid-build, since per-document upserts each commit in their
 # own transaction) as ready — see issue #525.
 _META_BUILD_COMPLETED_KEY = "build_completed_at"
+#: Present when the last completed build could not read every directory
+#: (#1785): the index is usable and warm restarts stay warm, but an empty
+#: cold embedding build may not trust it.
+_META_BUILD_WALK_INCOMPLETE_KEY = "build_walk_incomplete"
 
 # Keys recording the embedding provenance that determines FTS chunk
 # boundaries at build time (#649). The chunker is shared by FTS and
@@ -1583,8 +1587,14 @@ class FTSIndex:
         return row is not None
 
     @_retry_on_locked
-    def set_build_completed(self) -> None:
-        """Mark the FTS index as the result of a clean full build."""
+    def set_build_completed(self, *, walk_complete: bool = True) -> None:
+        """Mark the FTS index as the result of a clean full build.
+
+        Args:
+            walk_complete: Whether the build read every directory; ``False``
+                records that it could not (#1785), which
+                :meth:`is_build_walk_complete` reports.
+        """
         conn = self._conn()
         ts = datetime.datetime.now(tz=datetime.UTC).isoformat()
         with conn:
@@ -1592,13 +1602,40 @@ class FTSIndex:
                 "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
                 (_META_BUILD_COMPLETED_KEY, ts),
             )
+            if walk_complete:
+                conn.execute(
+                    "DELETE FROM meta WHERE key = ?", (_META_BUILD_WALK_INCOMPLETE_KEY,)
+                )
+            else:
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                    (_META_BUILD_WALK_INCOMPLETE_KEY, ts),
+                )
+
+    def is_build_walk_complete(self) -> bool:
+        """Return whether the last completed build read every directory (#1785).
+
+        ``False`` also when no build completed.
+        """
+        if not self.is_build_completed():
+            return False
+        conn = self._conn()
+        with conn:
+            row = conn.execute(
+                "SELECT 1 FROM meta WHERE key = ?",
+                (_META_BUILD_WALK_INCOMPLETE_KEY,),
+            ).fetchone()
+        return row is None
 
     @_retry_on_locked
     def clear_build_completed(self) -> None:
         """Erase the completeness sentinel (before a destructive rebuild)."""
         conn = self._conn()
         with conn:
-            conn.execute("DELETE FROM meta WHERE key = ?", (_META_BUILD_COMPLETED_KEY,))
+            conn.execute(
+                "DELETE FROM meta WHERE key IN (?, ?)",
+                (_META_BUILD_COMPLETED_KEY, _META_BUILD_WALK_INCOMPLETE_KEY),
+            )
 
     # ------------------------------------------------------------------
     # Chunking provenance: embedding model + char cap (issue #649)

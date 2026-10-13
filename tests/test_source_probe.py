@@ -58,3 +58,22 @@ def test_a_root_that_is_not_a_directory_is_unavailable(
     if root == "file":
         base.write_text("")
     assert FileSourceProbe(base).probe("a.md").status == "unavailable"
+
+
+def test_a_name_that_only_matches_case_insensitively_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a case-insensitive file system "Foo.md" stats as "foo.md" (#1785)."""
+    from pathlib import Path as _Path
+
+    (tmp_path / "foo.md").write_text("# Foo\n")
+    real_stat = _Path.stat
+
+    def case_insensitive_stat(self: _Path, **kw: object):  # type: ignore[no-untyped-def]
+        if self.name == "Foo.md":
+            return real_stat(self.with_name("foo.md"), **kw)
+        return real_stat(self, **kw)
+
+    monkeypatch.setattr(_Path, "stat", case_insensitive_stat)
+    assert FileSourceProbe(tmp_path).probe("Foo.md").status == "absent"
+    assert FileSourceProbe(tmp_path).probe("foo.md").status == "present"

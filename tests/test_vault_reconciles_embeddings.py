@@ -197,7 +197,7 @@ class TestAnUnreadableSource:
             root.chmod(0)
             try:
                 vault.index.build_index(force=True)
-                assert not vault._fts.is_build_completed()
+                assert not vault._fts.is_build_walk_complete()
                 vault.index.build_embeddings(force=True)
             finally:
                 root.chmod(0o755)

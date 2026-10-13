@@ -283,9 +283,9 @@ class EmbeddingsManager:
                 "build_embeddings_all_batches_failed total=%d outcome=no_vectors_saved",
                 total,
             )
-        elif not self._fts.is_build_completed():
-            # Empty is authoritative only for a keyword index that finished a
-            # complete build; an incomplete walk withholds the sentinel (#1785).
+        elif not self._fts.is_build_walk_complete():
+            # Empty is authoritative only for a keyword index whose last build
+            # completed and read every directory (#1785).
             logger.warning(
                 "build_embeddings_empty_not_authoritative reason=build_incomplete "
                 "outcome=no_vectors_saved"
