@@ -916,8 +916,10 @@ at load time and forces the rebuild automatically).
 
 Since #1157 the whole embedding lifecycle — the cold build, this
 convergence pass, inline reindex embedding, the deferred flush, and
-`embeddings_status` — is implemented by `managers/embeddings.py`'s
-`EmbeddingsManager`, a collaborator composed into `IndexManager`.
+`embeddings_status` — is orchestrated by `managers/embeddings.py`'s
+`EmbeddingsManager`, a collaborator composed into `IndexManager`; since
+#1768 every write those four sites make goes through one
+`EmbeddingReconciler` (`indexing/embedding_reconciler.py`, below).
 `IndexManager` keeps thin delegations (`build_embeddings`,
 `embeddings_status`, `flush_dirty_embeddings`, plus the internal
 `_open_store` / `_embed_note_inline` its FTS pipeline uses), so
@@ -928,15 +930,23 @@ callables (#736).
 
 `build_embeddings(force=False)` over a **non-empty** vector index does not
 skip and does not rebuild: it diffs the FTS `sections` table (the
-canonical chunk set, via `FTSIndex.list_chunks()`) against the stored
-vector metadata grouped by path (the store's `tokens()` and `rows_for()`) and
-reconciles:
+canonical chunk set, via `FTSIndex.list_chunks()`, which carries each
+document's `content_hash` as its token) against the stored rows and
+tokens (the store's `tokens()` and `rows_for()`) and reconciles:
 
 - Documents missing from the vector index are embedded and added.
-- Documents whose per-path `(title, heading, content)` chunk multiset
-  differs in any way (modified content, changed title, re-chunked
-  boundaries) are re-embedded in full. The multiset is the chunk identity
-  (the store has no per-chunk keys, only rows replaced per document).
+- Documents whose per-path `(title, heading, content, start_line,
+  preamble)` chunk multiset differs in any way (modified content, changed
+  title, re-chunked boundaries) are re-embedded in full. The multiset is
+  the chunk identity (the store has no per-chunk keys, only rows replaced
+  per document).
+- Documents whose multiset is equal but whose token moved (a
+  frontmatter-only edit outside the embedding input), or whose stored rows
+  carry no token (written before #1768), are **re-tokened**: the stored
+  vectors are republished under the new token with no provider call. The
+  spec (#1503 §2 step 3) re-embeds on any token change; equal input gives
+  equal vectors, so re-embedding would charge a provider call for every
+  frontmatter-only edit (#1768).
 - Vectors for documents no longer in the FTS index are removed — but only
   when the absence is **authoritative** (#1130). FTS row absence alone also
   covers a source the producing build failed to parse or a walk failed to
@@ -944,14 +954,14 @@ reconciles:
   against the source tree: an incomplete walk (unreadable or missing vault
   directory) confirms nothing and removes nothing, and a source still
   present on disk keeps its vectors — logged as
-  `build_embeddings_converge_kept` — unless re-parsing shows a state the
-  current build would also decline to embed (a deliberate
-  `missing_frontmatter` skip, or a note with no embeddable chunk text,
-  #930/#1087). Deletions and exclusions reclaim as before; a body-less note
-  that still has FTS chunk rows reclaims without touching the disk.
+  `build_embeddings_converge_kept` — unless it carries a tombstone (a
+  deliberate skip, #1129) or is excluded. Deletions and exclusions reclaim
+  as before; a body-less note that still has FTS chunk rows reclaims
+  without touching the disk.
 - Unchanged documents are untouched; the store is checkpointed only when
   something actually changed, and the run is summarised in a single
-  `build_embeddings_converged added=N removed=M up_to_date=K` log line.
+  `build_embeddings_converged added=N removed=M retokened=R up_to_date=K`
+  log line.
 
 This closes the FTS-vs-vector gap that the boot reconciliation reindex
 would otherwise widen: the boot `ReindexAll` job runs before the vector
@@ -984,9 +994,8 @@ oversized request. A provider failure (a request timeout being the
 motivating case, but also token-context rejection or a transient outage)
 is logged and skipped for that one note, leaving its existing vectors
 intact, rather than aborting the whole reindex. The vector mutation that
-follows is guarded identically to the convergence path (#935): a dimension
-mismatch from `add_vectors` skips just that note instead of aborting the
-loop. This keeps the FTS
+follows is guarded identically to the convergence path (#935): a vector
+the store refuses skips just that note instead of aborting the loop. This keeps the FTS
 refresh — including the `document_tags` structured-filter set — committed
 for **all** changed notes even while the embedding backend is timing out,
 so filters on freshly-edited frontmatter work immediately; the skipped
@@ -1013,11 +1022,10 @@ takes up to `_EMBEDDING_BATCH_SIZE` unrelated chunks down with it.
 provider" (non-whitespace text), and every embedding site filters through
 it:
 
-- `EmbeddingsManager._embed_inputs()` — the shared builder for the cold build,
-  the inline reindex, and the deferred flush — drops blank entries from
-  both the `texts` and `metadata` lists. Callers already treat an empty
-  result as "no vectors for this path", so a wholly body-less note reaches
-  the existing `delete_by_path` branch.
+- `EmbeddingReconciler.documents()` — the shared builder for every
+  embedding site since #1768 — drops blank entries from a document's
+  inputs; a wholly body-less note is a document with no inputs, whose
+  stored rows are removed.
 - The convergence pass filters the FTS rows **at the source**, before the
   signature diff, rather than at its embed call. This is load-bearing: the
   diff compares the FTS row multiset against the sidecar's, so a blank
@@ -1340,15 +1348,20 @@ refresh the other notes, then fail the job and retain the snapshot; tombstone
 read and stale-row deletion failures also remain retryable. A per-row success
 callback lets the writer enqueue embeddings for completed rows even if a sibling
 or final graph resolution fails. Failed snapshots remain retryable without
-starving healthy notes of vector updates. Deferred flush compares freshly
-prepared chunk metadata with the stored vector rows before calling the provider,
-so repeated FTS/graph retries reuse completed embeddings. Changed content,
-chunk boundaries/positions, titles, headings, or configured frontmatter preambles
-refresh them; failed embedding attempts have no matching rows and remain eligible.
-Unchanged rows still participate in saving so a failed sidecar save retries
-without paying the provider again. Vector loading stays lazy until a note
-parses successfully, but its failures propagate outside the per-note error
-handler so a sidecar permission/rebuild failure retains pending embeddings.
+starving healthy notes of vector updates. The deferred flush reads the refreshed
+keyword rows (#1768; it reads no file) and compares their token and chunk
+signature with the store's before calling the provider, so repeated FTS/graph
+retries reuse completed embeddings. Changed content, chunk boundaries/positions,
+titles, headings, or configured frontmatter preambles re-embed; an unchanged
+input under a new token is re-tokened without a provider call. A provider
+failure keeps the note's rows and holds its path for the next flush, without
+queueing one and without counting as pending work, so a note the provider keeps
+rejecting never leaves the writer undrained; a conflicting write is re-queued
+with a flush of its own. The store is checkpointed
+on every flush, so a failed checkpoint retries without paying the provider again.
+Store open and rebuild failures propagate, so the writer retains the snapshot.
+A note the refresh tombstoned (unparseable frontmatter, #1129) loses its vectors
+on the flush, as its keyword row already did.
 The boundary
 guarantees visibility of prior writes, not isolation from concurrent
 edits. Graph read tools keep their existing optional wait and stale metadata.
@@ -3295,7 +3308,7 @@ operations to them. No manager holds a back-reference to Vault.
 | ``LinkManager`` | Backlinks, outlinks, broken links, orphans, hubs, connection paths | ``FTSIndex``, ``source_dir`` |
 | ``SearchManager`` | Keyword/semantic/hybrid search, list, folders, tags, recent, similar, context, stats, get_metadata | ``FTSIndex``, ``source_dir``, embedding config, ``LinkManager`` |
 | ``IndexManager`` | build_index, reindex, process_dirty_paths; thin delegations for build_embeddings, embeddings_status, flush_dirty_embeddings | ``FTSIndex``, ``ChangeTracker``, ``source_dir``, chunk strategy, composed ``EmbeddingsManager`` (no lock; driven by the single-owner :class:`~markdown_vault_mcp.indexing.IndexWriter`, #559) |
-| ``EmbeddingsManager`` | Vector lifecycle: cold build, boot convergence, inline reindex embedding, deferred flush, embeddings_status (#1157) | ``FTSIndex``, ``source_dir``, embedding config, get/set-vectors callables, injected ``_is_path_excluded`` / ``_discover_indexable_candidates`` callables (#736 precedent); constructed by ``IndexManager``, not wired from ``Vault`` |
+| ``EmbeddingsManager`` | Vector lifecycle: cold build, boot convergence, inline reindex embedding, deferred flush, embeddings_status (#1157) | ``FTSIndex``, ``source_dir``, embedding config, the vault's vector slot and an `EmbeddingReconciler`, injected ``_is_path_excluded`` / ``_discover_indexable_candidates`` callables (#736 precedent); constructed by ``IndexManager``, not wired from ``Vault`` |
 | ``DocumentManager`` | read, write, edit, append, delete, rename, attachments, TOC | ``FTSIndex``, ``source_dir``, ``_file_write_lock`` (file-mutation atomicity only; see #559), ``mark_paths_dirty`` hook, callbacks |
 | ``GitQueryManager`` | Git history / diff / revision reads (read-only, #610, #1137) | ``GitWriteStrategy`` (or ``None`` when not a git repo), ``source_dir``, ``max_note_read_bytes`` |
 
@@ -4021,12 +4034,37 @@ holds another identity is rebuilt into a fresh one (owned) or emptied in
 place first (injected). The writer never writes into a store of another
 model: the reindex path writes only into an open store of the provider's
 model, and a populated injected store of another identity is refused
-outright. Rows carry no token yet and every write passes
-`expected_token=ANY_TOKEN`.
+outright.
 
-Bounds: tokens, the one reconciler and the file-backed `SourceProbe` are
-#1768's; the store's size in `embeddings_status` is #1377's; how often the
-full matrix is rewritten is #1497's.
+**One reconciler (#1768).** `indexing/embedding_reconciler.py`'s
+`EmbeddingReconciler` makes every write of the inline embed, the cold build,
+convergence and the dirty flush. Rows come from `KeywordIndex.list_chunks`,
+whose `content_hash` is each document's token; no source file is read on
+these paths. Per document it does nothing (token and chunk signature equal),
+re-tokens (signature equal, token moved or absent: the stored vectors are
+republished, no provider call), embeds (signature differs), or removes (a
+body-less document, or one the keyword index holds no rows for when
+`_confirm_stale_vector_paths` confirms the absence). It embeds before
+touching the store and publishes with `replace_document` /
+`remove_document` passing the token it observed, so a write that crosses
+another writer's returns `"conflict"`; the writer's runners re-queue
+conflicts with a flush and hold provider-failure paths for the next one,
+outside the pending work that drain status counts. At or above `_BULK_RETOKEN` (64) re-tokens in one pass, one
+`publish_generation` replaces the per-document replaces (each copies the
+whole matrix), holding every row as float32; that publish has no
+per-document token check, which the numpy store's one writer per location
+makes safe and #1504's pgvector backend must revisit. The cold build
+(`rebuild`) embeds every document in batches across documents and
+publishes one generation under each document's token; a failed batch
+leaves its documents to the next convergence pass.
+
+Bounds: the deletion authority (tombstone, exclusion, a file-backed
+`SourceProbe`), the build-completed sentinel for an empty cold build, and
+moving `IndexManager`'s exclusion and deletion purge loops (which still
+remove with `ANY_TOKEN`) into the reconciler are #1785's; the
+source-neutral conformance case is #1786's; the store's size in
+`embeddings_status` is #1377's; how often the full matrix is rewritten is
+#1497's.
 
 ### `providers.py`: Embedding Providers
 

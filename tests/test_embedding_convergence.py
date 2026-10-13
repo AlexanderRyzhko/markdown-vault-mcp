@@ -332,8 +332,7 @@ class TestBootEmbeddingConvergence:
             v2 = _boot(vault_dir, tmp_path, _FailingProvider())
         assert v2.index.embeddings_status()["chunk_count"] == count1
         assert any(
-            "build_embeddings_converge_skip_doc" in r.getMessage()
-            for r in caplog.records
+            "embedding_reconcile_skip_doc" in r.getMessage() for r in caplog.records
         )
         v2.close()
 
@@ -500,6 +499,7 @@ class TestAccessors:
                 "content",
                 "start_line",
                 "frontmatter_json",
+                "content_hash",
                 "is_first_chunk",
             }
         # is_first_chunk marks exactly the first row of each document.

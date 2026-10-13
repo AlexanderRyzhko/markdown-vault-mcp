@@ -59,9 +59,13 @@ from markdown_vault_mcp.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Collection, Iterable
 
 logger = logging.getLogger(__name__)
+
+#: Paths bound per ``list_chunks`` statement, well under SQLite's variable
+#: limit (32766 since 3.32; 999 before), so a large dirty set never fails.
+_PATHS_PER_QUERY = 900
 
 
 # Thresholds for running FTS5 'optimize' after a bulk purge.  Deleting rows
@@ -2025,38 +2029,67 @@ class FTSIndex:
         return int(row[0])
 
     @_retry_on_locked
-    def list_chunks(self) -> list[dict[str, Any]]:
-        """Return every indexed chunk joined with its document metadata.
+    def list_chunks(self, paths: Collection[str] | None = None) -> list[dict[str, Any]]:
+        """Return indexed chunks joined with their document metadata.
 
         Used to converge the vector index against the FTS chunk set
         (#665): the returned rows carry exactly the shape stored as
         vector-row metadata, so callers can diff and embed without
         re-parsing source files.
 
+        Args:
+            paths: Only these documents' chunks; ``None`` for every document.
+
         Returns:
             List of dicts with keys ``path``, ``title``, ``folder``,
             ``heading`` (may be ``None``), ``content``, ``start_line``,
-            ``frontmatter_json`` (the document's stored frontmatter), and
-            ``is_first_chunk`` (``True`` on each document's first row),
+            ``frontmatter_json`` (the document's stored frontmatter),
+            ``content_hash`` (the document's, the embedding token, #1768)
+            and ``is_first_chunk`` (``True`` on each document's first row),
             ordered by document path then chunk position.
         """
-        cur = self._conn().execute(
-            """
-            SELECT d.path, d.title, d.folder, s.heading, s.content,
-                   s.start_line, d.frontmatter_json
-            FROM sections AS s
-            JOIN documents AS d ON d.id = s.document_id
-            ORDER BY d.path, s.id
-            """
-        )
+        if paths is None:
+            fetched = self._chunk_rows(None)
+        else:
+            # Sorted and sliced, so no statement binds more variables than
+            # SQLite allows and the slices concatenate in path order.
+            ordered = sorted(set(paths))
+            fetched = [
+                raw
+                for start in range(0, len(ordered), _PATHS_PER_QUERY)
+                for raw in self._chunk_rows(ordered[start : start + _PATHS_PER_QUERY])
+            ]
         rows: list[dict[str, Any]] = []
         prev_path: str | None = None
-        for raw in cur.fetchall():
+        for raw in fetched:
             row = dict(raw)
             row["is_first_chunk"] = row["path"] != prev_path
             prev_path = row["path"]
             rows.append(row)
         return rows
+
+    def _chunk_rows(self, paths: list[str] | None) -> list[sqlite3.Row]:
+        """Fetch the chunk rows of *paths* (or of every document), in path order."""
+        where = ""
+        params: tuple[str, ...] = ()
+        if paths is not None:
+            params = tuple(paths)
+            where = f"WHERE d.path IN ({','.join('?' * len(params))})"
+        return (
+            self._conn()
+            .execute(
+                f"""
+            SELECT d.path, d.title, d.folder, s.heading, s.content,
+                   s.start_line, d.frontmatter_json, d.content_hash
+            FROM sections AS s
+            JOIN documents AS d ON d.id = s.document_id
+            {where}
+            ORDER BY d.path, s.id
+            """,
+                params,
+            )
+            .fetchall()
+        )
 
     @_retry_on_locked
     def get_toc(self, path: str, *, max_level: int | None = None) -> list[TocEntry]:

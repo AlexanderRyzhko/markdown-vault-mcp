@@ -112,6 +112,9 @@ class IndexWriter:
         self._dirty_lock = threading.Lock()
         self._dirty_paths: set[str] = set()
         self._dirty_embeddings: set[str] = set()
+        # Paths the embedding provider failed for (#1768): not pending work,
+        # so drain status ignores them, but the next flush retries them.
+        self._retry_embeddings: set[str] = set()
         self._in_flight_lock = threading.Lock()
         self._in_flight_kind: str | None = None
         # Monotonically increments each time a job finishes. Read under
@@ -207,6 +210,16 @@ class IndexWriter:
         with self._dirty_lock:
             self._dirty_embeddings.update(paths)
 
+    def mark_embedding_retry(self, paths: Iterable[str]) -> None:
+        """Keep paths the embedding provider failed for, for the next flush.
+
+        Unlike :meth:`mark_embedding_dirty` they do not count as pending
+        work, so a note the provider keeps rejecting cannot hold the writer
+        undrained (#1768).
+        """
+        with self._dirty_lock:
+            self._retry_embeddings.update(paths)
+
     def snapshot_dirty_paths(self) -> set[str]:
         """Return a snapshot of the FTS-dirty set without clearing it."""
         with self._dirty_lock:
@@ -225,10 +238,11 @@ class IndexWriter:
         return snapshot
 
     def drain_dirty_embeddings(self) -> set[str]:
-        """Snapshot-and-clear the vector-dirty set under the lock."""
+        """Snapshot-and-clear the vector-dirty set and the retries, under the lock."""
         with self._dirty_lock:
-            snapshot = set(self._dirty_embeddings)
+            snapshot = self._dirty_embeddings | self._retry_embeddings
             self._dirty_embeddings.clear()
+            self._retry_embeddings.clear()
         return snapshot
 
     def get_status(self) -> dict[str, Any]:
@@ -370,14 +384,41 @@ def run_build_index(job: BuildIndex, ctx: WriterContext) -> Any:
     return ctx.index_manager.build_index(force=job.force)
 
 
+def _requeue_conflicts(ctx: WriterContext) -> None:
+    """Send back the documents a vector write left behind (#1768).
+
+    A conflicting write gets another flush now; a document the provider
+    failed for waits for the next flush, without queueing one and without
+    counting as pending work, so a provider that is down neither spins the
+    writer nor holds it undrained.
+    """
+    if ctx.writer is None:
+        return
+    retries = getattr(ctx.index_manager, "take_embedding_retries", None)
+    retry = retries() if retries is not None else set()
+    if retry:
+        ctx.writer.mark_embedding_retry(retry)
+    take = getattr(ctx.index_manager, "take_embedding_conflicts", None)
+    conflicts = take() if take is not None else set()
+    if conflicts:
+        ctx.writer.mark_embedding_dirty(conflicts)
+        ctx.writer.submit(FlushDirtyEmbeddings())
+
+
 def run_reindex_all(job: ReindexAll, ctx: WriterContext) -> Any:  # noqa: ARG001
     """Execute an incremental FTS reindex via the change tracker."""
-    return ctx.index_manager.reindex()
+    try:
+        return ctx.index_manager.reindex()
+    finally:
+        _requeue_conflicts(ctx)
 
 
 def run_build_embeddings(job: BuildEmbeddings, ctx: WriterContext) -> Any:
     """Execute a full vector index build."""
-    return ctx.index_manager.build_embeddings(force=job.force)
+    try:
+        return ctx.index_manager.build_embeddings(force=job.force)
+    finally:
+        _requeue_conflicts(ctx)
 
 
 def run_process_dirty_paths(
@@ -424,3 +465,5 @@ def run_flush_dirty_embeddings(
         # silently drop the drained set.
         ctx.writer.mark_embedding_dirty(snapshot)
         raise
+    finally:
+        _requeue_conflicts(ctx)

@@ -61,6 +61,9 @@ def seeded(
 
 
 def _flush(col: Vault) -> None:
+    # The embedding rows come from the keyword index (#1768): refresh it
+    # first, as ProcessDirtyPaths does before it queues the flush.
+    col._index_mgr.process_dirty_paths({"note.md"})
     col._coordinator.writer.mark_embedding_dirty(["note.md"])
     col._coordinator.writer.submit(FlushDirtyEmbeddings()).result(5)
 
@@ -94,9 +97,8 @@ def test_failed_provider_attempt_is_retried(
     col, provider = seeded
     (col.source_dir / "note.md").write_text(_CONTENT.replace("Body", "Changed"))
     provider.fail_next = True
-    with pytest.raises(RuntimeError, match="provider unavailable"):
-        _flush(col)
-    assert col.index.get_index_status()["dirty_embeddings"] == 1
+    _flush(col)  # the provider fails: rows kept, the path waits for a retry (#1768)
+    assert col.index.is_drained()
     _flush(col)
     assert provider.calls == 2
     _flush(col)
@@ -175,25 +177,6 @@ def test_vector_load_failure_retains_pending_updates(
     _flush(col)
     assert provider.calls == 0
     assert col.index.get_index_status()["dirty_embeddings"] == 0
-
-
-def test_all_parse_failures_do_not_load_vectors(
-    seeded: tuple[Vault, _CountingProvider], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import markdown_vault_mcp.managers.embeddings as module
-
-    col, provider = seeded
-
-    def fail_parse(*_args: object, **_kwargs: object) -> None:
-        raise OSError("unreadable note")
-
-    def forbidden_load() -> None:
-        pytest.fail("failed parsing must not load or rebuild the vector index")
-
-    monkeypatch.setattr(module, "parse_note", fail_parse)
-    monkeypatch.setattr(col._index_mgr._embeddings, "_open_store", forbidden_load)
-    _flush(col)
-    assert provider.calls == 0
 
 
 @pytest.mark.parametrize(

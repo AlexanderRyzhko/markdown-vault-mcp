@@ -141,8 +141,7 @@ class TestARefusedWriteKeepsTheOldRows:
                 vault.index.reindex()
             assert metadata_by_path(_stored(vault))["alpha.md"] == old
             assert any(
-                r.msg.startswith("reindex_inline_embed_dim_mismatch")
-                for r in caplog.records
+                r.msg.startswith("embedding_reconcile_refused") for r in caplog.records
             )
         finally:
             vault.close()
@@ -164,8 +163,7 @@ class TestARefusedWriteKeepsTheOldRows:
                 assert vault.index.build_embeddings() == 0
             assert metadata_by_path(_stored(vault))["alpha.md"] == old
             assert any(
-                r.msg.startswith("build_embeddings_converge_dim_mismatch")
-                for r in caplog.records
+                r.msg.startswith("embedding_reconcile_refused") for r in caplog.records
             )
         finally:
             vault.close()
@@ -211,15 +209,14 @@ class TestUpgradingFromALegacySidecar:
             vault.index.build_index()
             assert vault.index.build_embeddings() == 0
             assert provider.calls == 0
-            vault._vectors.checkpoint()  # type: ignore[union-attr]
-            assert legacy_matrix.exists()  # nothing changed, nothing saved
-            (tmp_path / "vault" / "alpha.md").write_text("# Alpha\n\nQuinces now.\n")
-            vault.index.reindex()
+            # The token-less rows were adopted under their tokens (#1768) ...
+            assert None not in vault._vectors.tokens().values()  # type: ignore[union-attr]
         finally:
             vault.close()
+        # ... which is a change: the checkpoint moved the store to the new layout.
         names = sorted(p.name for p in tmp_path.glob("index-db-embeddings*"))
         assert "index-db-embeddings.json" in names
-        assert "index-db-embeddings.npy" not in names  # the first change moved it
+        assert not legacy_matrix.exists()
 
 
 class TestPurges:
