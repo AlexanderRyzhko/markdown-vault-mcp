@@ -463,11 +463,15 @@ class IndexStats:
         documents_indexed: Number of documents successfully indexed.
         chunks_indexed: Total number of chunks indexed.
         skipped: Number of documents skipped due to parse errors.
+        walk_complete: ``False`` when a directory could not be read, so the
+            scan may have missed notes; the build-completed sentinel is then
+            withheld (#1785).
     """
 
     documents_indexed: int
     chunks_indexed: int
     skipped: int
+    walk_complete: bool = True
 
 
 @dataclass

@@ -474,6 +474,7 @@ class IndexManager:
             skip_reasons[sf.path] = {"category": sf.category, "detail": sf.detail}
             skip_files[sf.path] = sf
 
+        walk_errors: list[OSError] = []
         notes = list(
             scan_directory(
                 self._source_dir,
@@ -483,8 +484,15 @@ class IndexManager:
                 on_skip=_collect_skip,
                 title_field=self._title_field,
                 attachment_extensions=self._attachment_extensions,
+                on_walk_error=walk_errors.append,
             )
         )
+        for exc in walk_errors:
+            # Not swallowed (#1785): an unreadable directory makes the scan
+            # incomplete, and the build says so instead of claiming a full one.
+            logger.warning(
+                "build_index_walk_incomplete dir=%s err=%s", exc.filename, exc
+            )
 
         total_chunks = 0
         errored = 0
@@ -602,6 +610,7 @@ class IndexManager:
             documents_indexed=len(notes) - errored,
             chunks_indexed=total_chunks,
             skipped=max(skipped, 0),
+            walk_complete=not walk_errors,
         )
 
     # ------------------------------------------------------------------

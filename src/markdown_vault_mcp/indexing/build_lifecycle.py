@@ -9,6 +9,7 @@ Future ordering: docs/design/reference/python-futures.md.
 
 from __future__ import annotations
 
+import logging
 import threading
 from concurrent.futures import CancelledError, Future
 from dataclasses import dataclass, field
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
 
     from markdown_vault_mcp.indexing.readiness import ReadinessState
     from markdown_vault_mcp.interfaces import KeywordIndex
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -168,7 +171,12 @@ class BuildLifecycle:
             self._fts.clear_build_completed()
             stats: IndexStats = run_build_index(job, ctx)
             scanning = False
-            self._fts.set_build_completed()
+            if getattr(stats, "walk_complete", True):
+                self._fts.set_build_completed()
+            else:
+                # The scan missed what it could not read: the index is usable
+                # but not complete, so no empty cold build may trust it (#1785).
+                logger.warning("build_index_sentinel_withheld reason=walk_incomplete")
         except CancelledError as exc:
             self._finish(attempt, _Unsuccessful("cancelled", exc))
             raise

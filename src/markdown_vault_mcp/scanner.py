@@ -2246,6 +2246,7 @@ def scan_directory(
     on_skip: Callable[[SkippedFile], None] | None = None,
     title_field: str = "title",
     attachment_extensions: frozenset[str] | None = None,
+    on_walk_error: Callable[[OSError], None] | None = None,
 ) -> Iterator[ParsedNote]:
     """Discover and parse all markdown files under ``source_dir``.
 
@@ -2281,6 +2282,11 @@ def scan_directory(
             document's title; passed through to :func:`parse_note`.
         attachment_extensions: Effective attachment allowlist; passed
             through to :func:`parse_note` (``None`` = the default set).
+        on_walk_error: Called with each ``OSError`` the directory walk meets,
+            such as an unreadable subdirectory, so the caller can tell an
+            incomplete scan from a complete one (#1785). ``None`` keeps the
+            historical silent skip. A non-default ``glob_pattern`` cannot
+            report walk errors.
 
     Yields:
         Parsed notes in filesystem traversal order.
@@ -2293,7 +2299,9 @@ def scan_directory(
     # semantics are unchanged. The per-file exclude filter below stays the
     # correctness layer either way.
     if glob_pattern == "**/*.md":
-        discovered: Iterable[Path] = iter_markdown_files(source_dir, exclude_patterns)
+        discovered: Iterable[Path] = iter_markdown_files(
+            source_dir, exclude_patterns, on_error=on_walk_error
+        )
     else:
         discovered = source_dir.glob(glob_pattern, **GLOB_SYMLINK_KWARGS)
 
