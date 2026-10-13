@@ -4077,8 +4077,8 @@ leaves its documents to the next convergence pass.
 Bounds: the source-neutral conformance case (an in-memory keyword index,
 a fake `SourceProbe`) is #1786's; an empty mount-point directory reads as
 an available, empty source, so its vectors go as they always did (a spec
-gap: "an unmounted volume removes nothing" holds only when the mount point
-itself is missing or unreadable); the store's size in
+gap, #1791: "an unmounted volume removes nothing" holds only when the
+mount point itself is missing or unreadable); the store's size in
 `embeddings_status` is #1377's; how often the full matrix is rewritten is
 #1497's.
 

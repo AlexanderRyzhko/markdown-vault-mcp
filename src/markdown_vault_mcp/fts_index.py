@@ -483,6 +483,20 @@ class ChunkingMeta(NamedTuple):
     semantics_version: int = 0
 
 
+def _meta_has(conn: sqlite3.Connection, key: str) -> bool:
+    """Return whether the ``meta`` table holds *key*.
+
+    Args:
+        conn: The connection to read through.
+        key: The meta key.
+
+    Returns:
+        ``True`` when a row for *key* exists.
+    """
+    row = conn.execute("SELECT 1 FROM meta WHERE key = ?", (key,)).fetchone()
+    return row is not None
+
+
 def _escape_like(value: str) -> str:
     """Escape SQLite LIKE special characters in ``value``.
 
@@ -933,11 +947,7 @@ class FTSIndex:
         Args:
             conn: The primary connection (inside :meth:`_init_schema`).
         """
-        row = conn.execute(
-            "SELECT 1 FROM meta WHERE key = ?",
-            (_META_FTS_ROWID_MAP_BACKFILLED_KEY,),
-        ).fetchone()
-        if row is not None:
+        if _meta_has(conn, _META_FTS_ROWID_MAP_BACKFILLED_KEY):
             return
         logger.info(
             "fts_index_rowid_map_backfill_started "
@@ -1580,11 +1590,7 @@ class FTSIndex:
         """
         conn = self._conn()
         with conn:
-            row = conn.execute(
-                "SELECT 1 FROM meta WHERE key = ?",
-                (_META_BUILD_COMPLETED_KEY,),
-            ).fetchone()
-        return row is not None
+            return _meta_has(conn, _META_BUILD_COMPLETED_KEY)
 
     @_retry_on_locked
     def set_build_completed(self, *, walk_complete: bool = True) -> None:
@@ -1621,11 +1627,7 @@ class FTSIndex:
             return False
         conn = self._conn()
         with conn:
-            row = conn.execute(
-                "SELECT 1 FROM meta WHERE key = ?",
-                (_META_BUILD_WALK_INCOMPLETE_KEY,),
-            ).fetchone()
-        return row is None
+            return not _meta_has(conn, _META_BUILD_WALK_INCOMPLETE_KEY)
 
     @_retry_on_locked
     def clear_build_completed(self) -> None:
