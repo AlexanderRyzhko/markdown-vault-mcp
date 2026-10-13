@@ -172,3 +172,35 @@ class TestRetriesFromEverySite:
             assert any("Quinces" in r["content"] for r in rows)
         finally:
             vault.close()
+
+
+class TestAnUnreadableSource:
+    def test_a_forced_rebuild_over_it_keeps_the_vectors(self, tmp_path):
+        # The default state file lives under source_dir; keep it outside so
+        # chmod(0) on the root does not fail the tracker's write instead.
+        root = tmp_path / "vault"
+        root.mkdir()
+        (root / "alpha.md").write_text("# Alpha\n\nApples and pears.\n")
+        vault = Vault(
+            source_dir=root,
+            settings=VaultSettings(
+                index_path=tmp_path / "index.db",
+                state_path=tmp_path / "state.json",
+                read_only=False,
+            ),
+            embedding_provider=MockEmbeddingProvider(),
+        )
+        try:
+            vault.index.build_index()
+            vault.index.build_embeddings()
+            before = sorted(metadata_by_path(vault._vectors))  # type: ignore[arg-type]
+            root.chmod(0)
+            try:
+                vault.index.build_index(force=True)
+                assert not vault._fts.is_build_completed()
+                vault.index.build_embeddings(force=True)
+            finally:
+                root.chmod(0o755)
+            assert sorted(metadata_by_path(vault._vectors)) == before  # type: ignore[arg-type]
+        finally:
+            vault.close()

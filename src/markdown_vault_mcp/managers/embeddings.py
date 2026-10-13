@@ -16,19 +16,19 @@ from __future__ import annotations
 
 import json
 import logging
-import stat as stat_module
 from typing import TYPE_CHECKING, Any
 
 from markdown_vault_mcp.exceptions import EmbeddingsNotConfiguredError
 from markdown_vault_mcp.indexing.embedding_reconciler import EmbeddingReconciler
-from markdown_vault_mcp.utils.fs import is_directory, path_exists
+from markdown_vault_mcp.source_probe import FileSourceProbe
+from markdown_vault_mcp.utils.fs import path_exists
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
     from markdown_vault_mcp.embed_text import EmbedTextBuilder
-    from markdown_vault_mcp.interfaces import EmbeddingStore, KeywordIndex
+    from markdown_vault_mcp.interfaces import EmbeddingStore, KeywordIndex, SourceProbe
     from markdown_vault_mcp.managers._vector_slot import VectorStoreSlot
     from markdown_vault_mcp.providers import EmbeddingProvider
     from markdown_vault_mcp.types import ParsedNote
@@ -74,9 +74,10 @@ class EmbeddingsManager:
             ``_EMBEDDING_BATCH_SIZE``.
         is_path_excluded: Injected exclusion check (the owner's
             ``_is_path_excluded``), so both pipelines share one policy.
-        discover_candidates: Injected source-tree discovery (the owner's
-            ``_discover_indexable_candidates``), used by the authoritative
-            empty-build check's source walk.
+        source_probe: Answers whether a document the keyword index holds no
+            rows for is still at its source; ``None`` uses a
+            :class:`~markdown_vault_mcp.source_probe.FileSourceProbe` over
+            ``source_dir`` (#1785).
         vector_slot: Opens, rebuilds and describes the vector store. ``None``
             with a provider builds a numpy store over ``embeddings_path``
             (in memory when that is ``None``), owned by this manager and
@@ -93,8 +94,8 @@ class EmbeddingsManager:
         embed_text_builder: EmbedTextBuilder,
         embedding_batch_size: int = _EMBEDDING_BATCH_SIZE,
         is_path_excluded: Callable[[str], bool],
-        discover_candidates: Callable[..., list[tuple[Path, str]]],
         vector_slot: VectorStoreSlot | None = None,
+        source_probe: SourceProbe | None = None,
     ) -> None:
         self._fts = fts
         self._source_dir = source_dir
@@ -103,7 +104,6 @@ class EmbeddingsManager:
         self._embed_builder = embed_text_builder
         self._embedding_batch_size = embedding_batch_size
         self._is_path_excluded = is_path_excluded
-        self._discover_candidates = discover_candidates
         if vector_slot is None and embedding_provider is not None:
             from markdown_vault_mcp.managers._vector_slot import VectorStoreSlot
             from markdown_vault_mcp.stores.numpy_sidecar import NumpySidecarBackend
@@ -123,7 +123,8 @@ class EmbeddingsManager:
                 provider=embedding_provider,
                 embed_builder=embed_text_builder,
                 batch_size=embedding_batch_size,
-                confirm_removal=self._confirm_stale_vector_paths,
+                source_probe=source_probe or FileSourceProbe(source_dir),
+                is_excluded=is_path_excluded,
             )
             if embedding_provider is not None
             else None
@@ -154,112 +155,6 @@ class EmbeddingsManager:
                 "Embeddings are not enabled on this server, so there is nothing "
                 "to build or query; search with mode='keyword' instead."
             )
-
-    def _empty_embedding_build_is_authoritative(self, indexed_paths: set[str]) -> bool:
-        """Return whether an empty FTS-derived embedding build is complete.
-
-        A forced FTS rebuild can omit a source that failed parsing, leaving no
-        row for :meth:`build_embeddings` to embed. Before replacing an old
-        sidecar with an empty one, inspect only source candidates absent from
-        FTS: since #1129, every deliberate skip (any surfaced category) leaves
-        a tombstone row, so a candidate is accounted for iff it has one — no
-        per-candidate re-parse needed. A candidate with neither a live row
-        nor a tombstone is an FTS-population gap, and an incomplete source
-        walk can hide candidates entirely (walk incompleteness is not
-        representable as tombstones), so both still veto the empty save.
-        """
-        walk_incomplete = False
-
-        def _record_walk_error(_exc: OSError) -> None:
-            nonlocal walk_incomplete
-            walk_incomplete = True
-
-        candidates = self._discover_candidates(on_walk_error=_record_walk_error)
-        if walk_incomplete:
-            logger.warning(
-                "build_embeddings_source_walk_incomplete outcome=no_vectors_saved"
-            )
-            return False
-
-        for _abs_path, path in candidates:
-            if path in indexed_paths:
-                continue
-            if self._fts.get_tombstone(path) is not None:
-                # Deliberately skipped — the absence is recorded, not a gap.
-                continue
-            logger.warning(
-                "build_embeddings_unindexed_source path=%s outcome=no_vectors_saved",
-                path,
-            )
-            return False
-        return True
-
-    def _confirm_stale_vector_paths(self, stale_paths: list[str]) -> list[str]:
-        """Return the stale sidecar paths whose FTS absence is authoritative.
-
-        A path present in the vector sidecar but absent from the FTS index is
-        reclaimable only when the absence means "not an index candidate".
-        Since #1129 that is a direct check: a deliberately skipped candidate
-        has a tombstone row, so a path is reclaimable iff it has a tombstone
-        OR its source is no longer a candidate at all (excluded by pattern,
-        or gone from disk — one ``stat`` replaces the former full
-        re-parse/walk). The conservative default stands (#1130): a source
-        still on disk with neither a live row nor a tombstone is a build gap
-        — the FTS gap, not the source, is the anomaly — so its vectors are
-        kept for the pass that next sees it.
-
-        An unavailable source *root* (unmounted volume, not-yet-populated
-        checkout) would make every per-path stat read as "gone" and wipe the
-        whole sidecar, so it confirms nothing — the cheap root check replaces
-        the former walk-incompleteness guard for this method.
-
-        Args:
-            stale_paths: Sidecar paths absent from the FTS chunk listing.
-
-        Returns:
-            The subset safe to reclaim, in input order.
-        """
-        if stale_paths and not _source_root_available(self._source_dir):
-            logger.warning(
-                "build_embeddings_converge_source_root_unavailable kept=%d "
-                "outcome=no_vectors_removed",
-                len(stale_paths),
-            )
-            return []
-        confirmed: list[str] = []
-        for path in stale_paths:
-            if self._fts.get_tombstone(path) is not None:
-                confirmed.append(path)
-                continue
-            if self._is_path_excluded(path) or self._stale_source_gone(path):
-                # Deleted or excluded — the reclaim convergence exists for.
-                confirmed.append(path)
-                continue
-            logger.warning(
-                "build_embeddings_converge_kept path=%s outcome=vectors_kept",
-                path,
-            )
-        return confirmed
-
-    def _stale_source_gone(self, path: str) -> bool:
-        """Return whether a stale sidecar path's source file is gone from disk.
-
-        ``FileNotFoundError`` / ``NotADirectoryError`` mean the source is
-        genuinely not there (or no longer a file), so its vectors are
-        reclaimable. Any other ``OSError`` — a permission flap, an I/O error
-        — is possibly transient and reads as *present*, so the conservative
-        keep applies and the next pass re-checks (#1130).
-        """
-        try:
-            st = (self._source_dir / path).stat()
-        except (FileNotFoundError, NotADirectoryError):
-            return True
-        except OSError as exc:
-            logger.debug(
-                "build_embeddings_converge_stat_failed path=%s err=%s", path, exc
-            )
-            return False
-        return not stat_module.S_ISREG(st.st_mode)
 
     def _loaded_store(self) -> EmbeddingStore | None:
         """Return the open store if this provider may write to it, opening nothing."""
@@ -385,11 +280,12 @@ class EmbeddingsManager:
                 "build_embeddings_all_batches_failed total=%d outcome=no_vectors_saved",
                 total,
             )
-        elif not self._empty_embedding_build_is_authoritative(
-            {row["path"] for row in self._fts.list_notes()}
-        ):
+        elif not self._fts.is_build_completed():
+            # Empty is authoritative only for a keyword index that finished a
+            # complete build; an incomplete walk withholds the sentinel (#1785).
             logger.warning(
-                "build_embeddings_empty_not_authoritative outcome=no_vectors_saved"
+                "build_embeddings_empty_not_authoritative reason=build_incomplete "
+                "outcome=no_vectors_saved"
             )
         else:
             store.publish_generation(identity, [])
@@ -404,8 +300,8 @@ class EmbeddingsManager:
         unchanged but whose token moved (or a legacy row with no token) is
         re-tokened without a provider call, one whose input changed is
         re-embedded in full, and one the keyword index holds no rows for
-        loses its vectors only when :meth:`_confirm_stale_vector_paths`
-        confirms the absence (tombstone, exclusion or a source gone, #1130).
+        loses its vectors only on a tombstone, an exclusion or a source
+        probe answering *absent* (#1130, #1785).
         A provider failure or a refused vector skips that document with its
         vectors kept, and the next run retries it (#649, #935). The store is
         checkpointed only when something changed.
@@ -520,8 +416,8 @@ class EmbeddingsManager:
         input and token are unchanged costs nothing, so retrying a failed
         batch does not charge again for its already embedded siblings. A
         path the keyword index holds no rows for (deleted, excluded or
-        tombstoned, #1129) loses its vectors when
-        :meth:`_confirm_stale_vector_paths` confirms it. A provider failure
+        tombstoned, #1129) loses its vectors on a tombstone, an exclusion or
+        a source probe answering *absent* (#1785). A provider failure
         or a refused vector keeps that path's rows and is logged; a
         conflicting write is recorded for re-queueing. Store open and
         rebuild errors propagate to the writer's Future.
@@ -560,16 +456,3 @@ class EmbeddingsManager:
         """
         conflicts, self._conflicts = self._conflicts, set()
         return conflicts
-
-
-def _source_root_available(source_dir: Path) -> bool:
-    """Whether the vault root can be relied on to judge a source "gone".
-
-    A root the server cannot stat is unavailable, like an unmounted one: every
-    per-path check under it would read as "gone", so nothing is reclaimed
-    (#1130, #1625).
-    """
-    try:
-        return is_directory(source_dir)
-    except OSError:
-        return False

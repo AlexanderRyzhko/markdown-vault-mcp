@@ -177,7 +177,6 @@ class IndexManager:
             embed_text_builder=self._embed_builder,
             embedding_batch_size=embedding_batch_size,
             is_path_excluded=self._is_path_excluded,
-            discover_candidates=self._discover_indexable_candidates,
             vector_slot=vector_slot,
         )
 

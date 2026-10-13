@@ -8,9 +8,11 @@ re-token (the input is unchanged and only the token moved, or a legacy row
 carries no token: the stored vectors are republished, no provider call),
 embed, or remove. It embeds outside any store call and publishes with the
 token it observed, so a write that crosses another writer's comes back as
-a conflict, which the caller re-queues. Whether a path the keyword index
-holds no rows for may lose its vectors stays with the caller
-(``confirm_removal``) until #1785.
+a conflict, which the caller re-queues. A path the store holds and the
+keyword index has no rows for loses its vectors only on a tombstone, an
+exclusion, or a source probe answering *absent* (#1785): *unavailable*
+keeps them, logged once per pass, and *present* is a keyword-index gap
+that keeps them too.
 """
 
 from __future__ import annotations
@@ -30,7 +32,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Collection
 
     from markdown_vault_mcp.embed_text import EmbedTextBuilder
-    from markdown_vault_mcp.interfaces import EmbeddingStore, KeywordIndex
+    from markdown_vault_mcp.interfaces import (
+        EmbeddingStore,
+        KeywordIndex,
+        SourceProbe,
+    )
     from markdown_vault_mcp.providers import EmbeddingProvider
     from markdown_vault_mcp.types import EmbeddingIdentity, RevisionToken
 
@@ -121,8 +127,9 @@ class EmbeddingReconciler:
         provider: Embeds the documents that need it.
         embed_builder: Builds each chunk's embedding text.
         batch_size: Most texts per provider call.
-        confirm_removal: Given paths the store holds and the keyword index
-            has no rows for, returns those whose vectors may go.
+        source_probe: Answers whether a document the keyword index holds no
+            rows for is still at its source.
+        is_excluded: Whether a path matches the vault's exclusions.
     """
 
     def __init__(
@@ -132,13 +139,15 @@ class EmbeddingReconciler:
         provider: EmbeddingProvider,
         embed_builder: EmbedTextBuilder,
         batch_size: int,
-        confirm_removal: Callable[[list[str]], list[str]],
+        source_probe: SourceProbe,
+        is_excluded: Callable[[str], bool],
     ) -> None:
         self._fts = fts
         self._provider = provider
         self._builder = embed_builder
         self._batch_size = batch_size
-        self._confirm_removal = confirm_removal
+        self._source_probe = source_probe
+        self._is_excluded = is_excluded
 
     def documents(self, paths: Collection[str] | None = None) -> dict[str, _Document]:
         """Read *paths*' (or every) document's embedding inputs from the keyword index.
@@ -217,11 +226,34 @@ class EmbeddingReconciler:
         return state.result
 
     def _remove_unbacked(self, state: _Pass, paths: list[str]) -> None:
-        """Remove the vectors of *paths* the caller confirms may go."""
-        if not paths:
-            return
-        for path in self._confirm_removal(paths):
-            self._remove(state, path)
+        """Remove the vectors of *paths* whose absence is authoritative (#1785).
+
+        A tombstone or an exclusion removes without asking the source; then
+        the source probe decides: *absent* removes, *unavailable* keeps (one
+        WARNING for the pass), *present* is a keyword-index gap and keeps.
+        """
+        unavailable = 0
+        for path in paths:
+            if self._fts.get_tombstone(path) is not None or self._is_excluded(path):
+                self._remove(state, path)
+                continue
+            answer = self._source_probe.probe(path).status
+            if answer == "absent":
+                self._remove(state, path)
+            elif answer == "unavailable":
+                unavailable += 1
+            else:
+                logger.warning(
+                    "embedding_reconcile_kept site=%s path=%s reason=keyword_gap",
+                    state.site,
+                    path,
+                )
+        if unavailable:
+            logger.warning(
+                "embedding_reconcile_source_unavailable site=%s kept=%d",
+                state.site,
+                unavailable,
+            )
 
     def _remove(self, state: _Pass, path: str) -> None:
         """Remove *path*'s rows, conditional on the token observed."""

@@ -128,9 +128,9 @@ def test_rebase_check_that_cannot_stat_assumes_a_rebase(
 
 
 def test_embeddings_root_that_cannot_be_statted_is_unavailable(shut: Path) -> None:
-    from markdown_vault_mcp.managers.embeddings import _source_root_available
+    from markdown_vault_mcp.source_probe import FileSourceProbe
 
-    assert _source_root_available(shut / "inner") is False
+    assert FileSourceProbe(shut / "inner").probe("a.md").status == "unavailable"
 
 
 def test_cli_names_an_unreadable_source_dir(
