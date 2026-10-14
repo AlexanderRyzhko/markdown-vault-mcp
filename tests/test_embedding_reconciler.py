@@ -644,10 +644,14 @@ class TestChunkReuse:
         assert stored == indexed
 
     def test_a_reused_vector_equals_the_stored_one(self, tmp_path):
-        fts, _provider, store, rec = _setup(tmp_path, SECTIONED, chunker=SECTIONS)
+        fts, provider, store, rec = _setup(tmp_path, SECTIONED, chunker=SECTIONS)
         rec.reconcile(store, site="test")
         before = _vectors(store, "s.md")
         _edit(fts, tmp_path, "s.md", EDITED)
+        real = provider.embed
+        # A provider that no longer reproduces the stored vectors: only a
+        # chunk that was not sent to it can still carry its stored vector.
+        provider.embed = lambda texts: real([f"salt {t}" for t in texts])  # type: ignore[method-assign]
         rec.reconcile(store, ["s.md"], site="test")
         after = _vectors(store, "s.md")
         kept = [content for content in before if content in after]
