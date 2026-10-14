@@ -608,8 +608,12 @@ def test_all_tombstone_vault_warm_restarts(
 # ---------------------------------------------------------------------------
 
 
-def test_empty_build_not_authoritative_without_tombstone(tmp_path: Path) -> None:
-    """An absentee with neither row nor tombstone vetoes the empty save."""
+def test_empty_build_authoritative_only_with_the_build_sentinel(tmp_path: Path) -> None:
+    """An empty cold build publishes only over a completed keyword build (#1785).
+
+    A keyword gap (no row, no tombstone, source still there) no longer
+    vetoes it on its own: the sentinel is the one authority.
+    """
     from tests.conftest import MockEmbeddingProvider
     from tests.test_managers_index import _make_index_mgr, _stored
 
@@ -631,5 +635,9 @@ def test_empty_build_not_authoritative_without_tombstone(tmp_path: Path) -> None
     # Build gap: the row (and any tombstone) vanish while the source stays.
     fts.delete_by_path("note.md")
     assert mgr.build_embeddings(force=True) == 0
-    # No empty generation is published: the old vector survives on disk.
+    # No sentinel (a manager-level build sets none): nothing is published.
     assert _stored(embeddings_path, provider).count == 1
+    # With the sentinel the empty keyword index is authoritative.
+    fts.set_build_completed()
+    assert mgr.build_embeddings(force=True) == 0
+    assert _stored(embeddings_path, provider).count == 0

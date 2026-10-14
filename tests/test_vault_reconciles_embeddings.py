@@ -172,3 +172,94 @@ class TestRetriesFromEverySite:
             assert any("Quinces" in r["content"] for r in rows)
         finally:
             vault.close()
+
+
+class TestAnUnreadableSource:
+    def test_a_forced_rebuild_over_it_keeps_the_vectors(self, tmp_path):
+        # The default state file lives under source_dir; keep it outside so
+        # chmod(0) on the root does not fail the tracker's write instead.
+        root = tmp_path / "vault"
+        root.mkdir()
+        (root / "alpha.md").write_text("# Alpha\n\nApples and pears.\n")
+        vault = Vault(
+            source_dir=root,
+            settings=VaultSettings(
+                index_path=tmp_path / "index.db",
+                state_path=tmp_path / "state.json",
+                read_only=False,
+            ),
+            embedding_provider=MockEmbeddingProvider(),
+        )
+        try:
+            vault.index.build_index()
+            vault.index.build_embeddings()
+            before = sorted(metadata_by_path(vault._vectors))  # type: ignore[arg-type]
+            root.chmod(0)
+            try:
+                vault.index.build_index(force=True)
+                assert not vault._fts.is_build_walk_complete()
+                vault.index.build_embeddings(force=True)
+            finally:
+                root.chmod(0o755)
+            assert sorted(metadata_by_path(vault._vectors)) == before  # type: ignore[arg-type]
+        finally:
+            vault.close()
+
+
+class TestPurgesUseObservedTokens:
+    def _spy(self, store, monkeypatch):
+        expected: list[Any] = []
+        real = store.remove_document
+        monkeypatch.setattr(
+            store,
+            "remove_document",
+            lambda path, *, expected_token: (
+                expected.append(expected_token)
+                or real(path, expected_token=expected_token)
+            ),
+        )
+        return expected
+
+    def test_a_deleted_note(self, tmp_path, monkeypatch):
+        vault = _vault(tmp_path, MockEmbeddingProvider())
+        try:
+            vault.index.build_index()
+            vault.index.build_embeddings()
+            store = vault._vectors
+            token = store.tokens()["beta.md"]  # type: ignore[union-attr]
+            expected = self._spy(store, monkeypatch)
+            (vault.source_dir / "beta.md").unlink()
+            vault.index.reindex()
+            assert expected == [token]
+            assert sorted(metadata_by_path(store)) == ["alpha.md"]  # type: ignore[arg-type]
+        finally:
+            vault.close()
+
+    def test_a_newly_excluded_note(self, tmp_path, monkeypatch):
+        vault = _vault(tmp_path, MockEmbeddingProvider())
+        try:
+            vault.index.build_index()
+            vault.index.build_embeddings()
+        finally:
+            vault.close()
+        root = tmp_path / "vault"
+        vault = Vault(
+            source_dir=root,
+            settings=VaultSettings(
+                index_path=tmp_path / "index.db",
+                read_only=False,
+                exclude_patterns=["beta.md"],
+            ),
+            embedding_provider=MockEmbeddingProvider(),
+        )
+        try:
+            vault.index.build_index()
+            vault.index.build_embeddings()
+            store = vault._vectors
+            token = store.tokens()["beta.md"]  # type: ignore[union-attr]
+            expected = self._spy(store, monkeypatch)
+            vault.index.reindex()
+            assert expected == [token]
+            assert sorted(metadata_by_path(store)) == ["alpha.md"]  # type: ignore[arg-type]
+        finally:
+            vault.close()

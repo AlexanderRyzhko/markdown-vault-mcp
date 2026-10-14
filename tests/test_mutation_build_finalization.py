@@ -65,10 +65,10 @@ def test_mutation_waits_for_build_finalization(
     started, release = threading.Event(), threading.Event()
     original = col._fts.set_build_completed
 
-    def held_finalize() -> None:
+    def held_finalize(**kwargs: bool) -> None:
         started.set()
         assert release.wait(5)
-        original()
+        original(**kwargs)
 
     monkeypatch.setattr(col._fts, "set_build_completed", held_finalize)
     try:
@@ -101,7 +101,7 @@ def test_failed_finalization_rejects_mutation_with_build_failure(
     col = _vault(tmp_path)
     started, release = threading.Event(), threading.Event()
 
-    def fail_finalize() -> None:
+    def fail_finalize(**_kwargs: bool) -> None:
         started.set()
         assert release.wait(5)
         raise OSError("completion marker failed")

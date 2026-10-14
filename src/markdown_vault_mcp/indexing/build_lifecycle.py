@@ -9,6 +9,7 @@ Future ordering: docs/design/reference/python-futures.md.
 
 from __future__ import annotations
 
+import logging
 import threading
 from concurrent.futures import CancelledError, Future
 from dataclasses import dataclass, field
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
 
     from markdown_vault_mcp.indexing.readiness import ReadinessState
     from markdown_vault_mcp.interfaces import KeywordIndex
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -168,7 +171,12 @@ class BuildLifecycle:
             self._fts.clear_build_completed()
             stats: IndexStats = run_build_index(job, ctx)
             scanning = False
-            self._fts.set_build_completed()
+            self._fts.set_build_completed(walk_complete=stats.walk_complete)
+            if not stats.walk_complete:
+                # The build completed: warm restarts stay warm (the tracker
+                # keeps unwalked subtrees). It is recorded as incomplete so no
+                # empty cold build trusts it (#1785).
+                logger.warning("build_index_recorded_incomplete reason=walk_errors")
         except CancelledError as exc:
             self._finish(attempt, _Unsuccessful("cancelled", exc))
             raise

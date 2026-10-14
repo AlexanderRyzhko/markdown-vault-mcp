@@ -1136,3 +1136,19 @@ class TestStripFrontmatterBlock:
         # ``frontmatter.parse`` strips before detecting, so the indexer reads
         # this as frontmatter; leaving the block in the body would stack it.
         assert strip_frontmatter_block("\n\n---\ntitle: T\n---\n\n# T\n") == "# T\n"
+
+
+def test_an_unreadable_directory_is_reported_not_swallowed(tmp_path: Path) -> None:
+    """A walk error reaches the caller instead of passing for a complete scan (#1785)."""
+    (tmp_path / "ok.md").write_text("# Ok\n\nbody\n")
+    shut = tmp_path / "shut"
+    shut.mkdir()
+    (shut / "hidden.md").write_text("# Hidden\n\nbody\n")
+    shut.chmod(0)
+    errors: list[OSError] = []
+    try:
+        notes = list(scan_directory(tmp_path, on_walk_error=errors.append))
+    finally:
+        shut.chmod(0o755)
+    assert [n.path for n in notes] == ["ok.md"]
+    assert len(errors) == 1

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from markdown_vault_mcp.embed_text import EmbedTextBuilder
@@ -13,6 +14,8 @@ from markdown_vault_mcp.types import (
     ANY_TOKEN,
     DocumentRows,
     EmbeddingIdentity,
+    SkippedFile,
+    SourceState,
 )
 from tests.conftest import MockEmbeddingProvider
 from tests.fixtures.vectors import metadata_by_path
@@ -41,7 +44,25 @@ def _index(tmp_path: Path, notes: dict[str, str]) -> FTSIndex:
     return fts
 
 
-def _setup(tmp_path: Path, notes: dict[str, str], removable: list[str] | None = None):
+class _Probe:
+    """A SourceProbe answering from a dict; unknown paths are present."""
+
+    def __init__(self, answers: dict[str, str] | None = None) -> None:
+        self.answers = answers or {}
+        self.asked: list[str] = []
+
+    def probe(self, path: str) -> SourceState:
+        self.asked.append(path)
+        status = self.answers.get(path, "present")
+        return SourceState(status, "t" if status == "present" else None)  # type: ignore[arg-type]
+
+
+def _setup(
+    tmp_path: Path,
+    notes: dict[str, str],
+    probe: _Probe | None = None,
+    excluded: tuple[str, ...] = (),
+):
     fts = _index(tmp_path, notes)
     provider = _Counting()
     store = NumpySidecarBackend().open(None, EmbeddingIdentity.of(provider, "v1"))
@@ -50,7 +71,8 @@ def _setup(tmp_path: Path, notes: dict[str, str], removable: list[str] | None = 
         provider=provider,
         embed_builder=EmbedTextBuilder(),
         batch_size=4,
-        confirm_removal=lambda paths: [p for p in paths if p in (removable or [])],
+        source_probe=probe or _Probe(),
+        is_excluded=lambda p: p in excluded,
     )
     return fts, provider, store, reconciler
 
@@ -122,8 +144,10 @@ class TestDecisions:
         assert result.removed == 1
         assert "a.md" not in metadata_by_path(store)
 
-    def test_a_path_without_rows_is_removed_only_when_confirmed(self, tmp_path):
-        fts, _, store, rec = _setup(tmp_path, NOTES, removable=["a.md"])
+    def test_a_path_without_rows_is_removed_only_when_its_source_is_absent(
+        self, tmp_path
+    ):
+        fts, _, store, rec = _setup(tmp_path, NOTES, probe=_Probe({"a.md": "absent"}))
         rec.reconcile(store, site="test")
         fts.delete_by_path("a.md")
         fts.delete_by_path("b.md")
@@ -308,3 +332,65 @@ class TestRetries:
 
         provider.embed = down  # type: ignore[method-assign]
         assert rec.reconcile(store, site="test").retry == {"a.md"}
+
+
+class TestRemovalRule:
+    def _orphan(self, tmp_path, **kw):
+        fts, _provider, store, rec = _setup(tmp_path, NOTES, **kw)
+        rec.reconcile(store, site="test")
+        fts.delete_by_path("a.md")
+        return fts, store, rec
+
+    def test_absent_removes(self, tmp_path):
+        _, store, rec = self._orphan(tmp_path, probe=_Probe({"a.md": "absent"}))
+        rec.reconcile(store, site="test")
+        assert sorted(metadata_by_path(store)) == ["b.md"]
+
+    def test_an_exclusion_removes_without_asking_the_source(self, tmp_path):
+        probe = _Probe()
+        _, store, rec = self._orphan(tmp_path, probe=probe, excluded=("a.md",))
+        rec.reconcile(store, site="test")
+        assert sorted(metadata_by_path(store)) == ["b.md"]
+        assert probe.asked == []
+
+    def test_a_tombstone_removes_without_asking_the_source(self, tmp_path):
+        probe = _Probe()
+        fts, store, rec = self._orphan(tmp_path, probe=probe)
+        fts.upsert_tombstone(
+            SkippedFile(path="a.md", category="parse_error", detail="x"),
+            content_hash="h",
+            modified_at=0.0,
+        )
+        rec.reconcile(store, site="test")
+        assert sorted(metadata_by_path(store)) == ["b.md"]
+        assert probe.asked == []
+
+    def test_a_keyword_gap_keeps_and_says_so(
+        self, tmp_path, caplog: pytest.LogCaptureFixture
+    ):
+        _, store, rec = self._orphan(tmp_path, probe=_Probe({"a.md": "present"}))
+        with caplog.at_level(logging.WARNING):
+            rec.reconcile(store, site="test")
+        assert "a.md" in metadata_by_path(store)
+        assert any(r.msg.startswith("embedding_reconcile_kept") for r in caplog.records)
+
+    def test_unavailable_keeps_with_one_warning_per_pass(
+        self, tmp_path, caplog: pytest.LogCaptureFixture
+    ):
+        fts, _provider, store, rec = _setup(
+            tmp_path,
+            NOTES,
+            probe=_Probe({"a.md": "unavailable", "b.md": "unavailable"}),
+        )
+        rec.reconcile(store, site="test")
+        fts.delete_by_path("a.md")
+        fts.delete_by_path("b.md")
+        with caplog.at_level(logging.WARNING):
+            rec.reconcile(store, site="test")
+        assert sorted(metadata_by_path(store)) == ["a.md", "b.md"]
+        unavailable = [
+            r
+            for r in caplog.records
+            if r.msg.startswith("embedding_reconcile_source_unavailable")
+        ]
+        assert len(unavailable) == 1

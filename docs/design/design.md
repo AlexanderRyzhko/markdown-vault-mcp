@@ -642,8 +642,9 @@ instead stays PRESENT as a *tombstone* row: `skip_category` non-NULL,
 `chunk_count = 0`, no child rows. Excluded-by-pattern files stay absent —
 exclusion is config-static, so their absence is already unambiguous — and so
 do transient `OSError` skips (nothing is recorded; the file retries next
-scan). Walk incompleteness is not representable as tombstones, so the
-embeddings empty-build check keeps its `on_walk_error` source walk.
+scan). Walk incompleteness is not representable as tombstones; the keyword
+build records it instead (#1785, below), and an empty cold embedding build
+asks that record rather than walking the source.
 
 **Invariant.** A tombstone row exists iff the path is currently in the
 tracker's `skip_reasons` registry, which stays authoritative for
@@ -718,7 +719,14 @@ Two methods manage the index:
   rebuild. The sentinel is the `build_completed_at` row in the FTS
   `meta` table, cleared by `IndexFacet.build_index` before any
   destructive rebuild and written only after `_index_mgr.build_index`
-  returns cleanly. `force=True` drops and rebuilds from scratch. When a
+  returns cleanly. A build whose walk met an unreadable directory still
+  writes the sentinel (warm restarts stay warm: the tracker keeps what it
+  could not walk), and records the incomplete walk beside it
+  (`build_walk_incomplete` in `meta`, `KeywordIndex.is_build_walk_complete()`,
+  #1785); `scan_directory` reports walk errors instead of swallowing them,
+  and the build logs each (`build_index_walk_incomplete`) and returns
+  `IndexStats(walk_complete=False)`. `force=True` drops and rebuilds from
+  scratch. When a
   persistent `index_path` contains documents that now match
   `exclude_patterns`, they are purged from the FTS and vector indexes
   after the scan, but only when a scan actually runs (that is, on a cold
@@ -948,16 +956,18 @@ tokens (the store's `tokens()` and `rows_for()`) and reconciles:
   equal vectors, so re-embedding would charge a provider call for every
   frontmatter-only edit (#1768).
 - Vectors for documents no longer in the FTS index are removed — but only
-  when the absence is **authoritative** (#1130). FTS row absence alone also
-  covers a source the producing build failed to parse or a walk failed to
-  see (#1129), so a sidecar path with no FTS rows at all is first confirmed
-  against the source tree: an incomplete walk (unreadable or missing vault
-  directory) confirms nothing and removes nothing, and a source still
-  present on disk keeps its vectors — logged as
-  `build_embeddings_converge_kept` — unless it carries a tombstone (a
-  deliberate skip, #1129) or is excluded. Deletions and exclusions reclaim
-  as before; a body-less note that still has FTS chunk rows reclaims
-  without touching the disk.
+  when the absence is **authoritative** (#1130, #1785). A tombstone (a
+  deliberate skip, #1129) or an exclusion removes them; otherwise the
+  `SourceProbe` decides (the file-backed `FileSourceProbe`: a `stat`
+  classified by errno, with every path component confirmed under its exact
+  name in its directory listing, so a case-only rename of a note or a
+  folder on a case-insensitive file system reads as absent). *Absent*
+  removes; *unavailable* — a refused stat or read, or a source root that is
+  not a statable directory (the root check lives in the probe, not the
+  embedding path) — keeps them, logged once per pass
+  (`embedding_reconcile_source_unavailable`); *present* is a keyword-index
+  gap and keeps them, logged per path (`embedding_reconcile_kept`). A
+  body-less note that still has FTS chunk rows reclaims without asking.
 - Unchanged documents are untouched; the store is checkpointed only when
   something actually changed, and the run is summarised in a single
   `build_embeddings_converged added=N removed=M retokened=R up_to_date=K`
@@ -4043,8 +4053,14 @@ whose `content_hash` is each document's token; no source file is read on
 these paths. Per document it does nothing (token and chunk signature equal),
 re-tokens (signature equal, token moved or absent: the stored vectors are
 republished, no provider call), embeds (signature differs), or removes (a
-body-less document, or one the keyword index holds no rows for when
-`_confirm_stale_vector_paths` confirms the absence). It embeds before
+body-less document, or one the keyword index holds no rows for on a
+tombstone, an exclusion or a `SourceProbe` answering *absent*, #1785).
+`IndexManager`'s exclusion purge and reindex deletion loop delete their
+keyword rows and hand the paths to the reconciler too, so every vector
+write carries the token it observed. An empty cold build is published only
+when the keyword index's last build completed and read every directory
+(`is_build_walk_complete()`); the source walk and root check are gone
+from the embedding path. It embeds before
 touching the store and publishes with `replace_document` /
 `remove_document` passing the token it observed, so a write that crosses
 another writer's returns `"conflict"`; the writer's runners re-queue
@@ -4058,11 +4074,11 @@ makes safe and #1504's pgvector backend must revisit. The cold build
 publishes one generation under each document's token; a failed batch
 leaves its documents to the next convergence pass.
 
-Bounds: the deletion authority (tombstone, exclusion, a file-backed
-`SourceProbe`), the build-completed sentinel for an empty cold build, and
-moving `IndexManager`'s exclusion and deletion purge loops (which still
-remove with `ANY_TOKEN`) into the reconciler are #1785's; the
-source-neutral conformance case is #1786's; the store's size in
+Bounds: the source-neutral conformance case (an in-memory keyword index,
+a fake `SourceProbe`) is #1786's; an empty mount-point directory reads as
+an available, empty source, so its vectors go as they always did (a spec
+gap, #1791: "an unmounted volume removes nothing" holds only when the
+mount point itself is missing or unreadable); the store's size in
 `embeddings_status` is #1377's; how often the full matrix is rewritten is
 #1497's.
 

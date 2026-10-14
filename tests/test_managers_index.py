@@ -1078,10 +1078,9 @@ class TestBuildEmbeddings:
         )
 
     def test_force_rebuild_persists_empty_only_after_successful_parse(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path
     ) -> None:
         """An authoritative empty rebuild replaces stale on-disk vectors."""
-        from markdown_vault_mcp.managers import index as index_module
 
         vault = tmp_path / "vault"
         vault.mkdir()
@@ -1108,22 +1107,16 @@ class TestBuildEmbeddings:
         # A forced FTS rebuild tombstones the malformed source (#1129).
         mgr.build_index(force=True)
 
-        # An incomplete directory walk is never authoritative, even when the
-        # unreadable subtree leaves discovery with no candidates — walk
-        # incompleteness is not representable as tombstones.
-        def incomplete_walk(_source, _excludes, *, on_error=None):
-            if on_error is not None:
-                on_error(PermissionError("unreadable subtree"))
-            return iter(())
+        # Without the build-completed sentinel (the build lifecycle sets it
+        # after a complete walk; this manager-level build does not) an empty
+        # cold build is not authoritative (#1785).
+        assert mgr.build_embeddings(force=True) == 0
+        assert _stored(embeddings_path, provider).count == 1
 
-        with monkeypatch.context() as patch:
-            patch.setattr(index_module, "iter_markdown_files", incomplete_walk)
-            assert mgr.build_embeddings(force=True) == 0
-            assert _stored(embeddings_path, provider).count == 1
-
-        # With the walk intact, the absentee now carries a tombstone, so the
-        # empty build IS authoritative (#1129): the unparseable file stops
-        # serving its stale vector, mirroring the FTS stale-row fix.
+        # With the sentinel, the empty build IS authoritative: the
+        # unparseable file stops serving its stale vector, mirroring the FTS
+        # stale-row fix (#1129).
+        mgr._fts.set_build_completed()
         assert mgr.build_embeddings(force=True) == 0
         assert _stored(embeddings_path, provider).count == 0
 
@@ -1268,8 +1261,7 @@ class TestConvergeStaleConfirmation:
             "bad.md",
         }
         assert any(
-            "build_embeddings_converge_kept" in r.getMessage()
-            and "bad.md" in r.getMessage()
+            "embedding_reconcile_kept" in r.getMessage() and "bad.md" in r.getMessage()
             for r in caplog.records
         )
 
@@ -1316,7 +1308,7 @@ class TestConvergeStaleConfirmation:
             "bad.md",
         }
         assert any(
-            "build_embeddings_converge_source_root_unavailable" in r.getMessage()
+            "embedding_reconcile_source_unavailable" in r.getMessage()
             for r in caplog.records
         )
 
