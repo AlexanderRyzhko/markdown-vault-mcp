@@ -1,4 +1,7 @@
-"""The resident vector snapshot both built-in stores read from (#1497).
+"""The resident vector snapshot the built-in stores read from (#1497).
+
+The numpy store always reads from it, the SQLite store in its resident
+mode; a streamed SQLite store keeps only a rowless one (#1377).
 
 Rows live in memory as one float32 matrix with a parallel metadata list,
 held together with the tokens, identity and generation in one immutable
@@ -71,13 +74,24 @@ def fresh_snapshot(identity: EmbeddingIdentity) -> Snapshot:
     return Snapshot(identity, 0, empty, (), MappingProxyType({}))
 
 
+def hollow_snapshot(identity: EmbeddingIdentity, generation: int) -> Snapshot:
+    """Return a rowless snapshot carrying only *identity* and *generation*.
+
+    What a streamed store keeps resident (#1377): its rows stay in the
+    database.
+    """
+    empty = fresh_snapshot(identity)
+    return Snapshot(identity, generation, empty.matrix, (), empty.tokens)
+
+
 def _normalised(vectors: Any) -> Any:
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     norms = np.where(norms == 0, 1.0, norms)
     return (vectors / norms).astype(np.float32, copy=False)
 
 
-def _unit(vector: Any) -> Any:
+def unit_vector(vector: Any) -> Any:
+    """Return *vector* scaled to unit length; a zero vector unchanged."""
     norm = float(np.linalg.norm(vector))
     return vector / norm if norm > 0 else vector
 
@@ -180,6 +194,7 @@ def generation_snapshot(
 class ResidentStore:
     """The reads of a store served from an installed :class:`Snapshot`.
 
+    A streamed SQLite store overrides these reads with queries (#1377).
     A subclass publishes: it builds the next snapshot, persists it, and
     assigns it to ``_snap`` under ``_lock``.
 
@@ -244,7 +259,7 @@ class ResidentStore:
                 f"Query dimension mismatch: the store holds dimension "
                 f"{snap.matrix.shape[1]}, the query has {query.shape[-1]}."
             )
-        scores = snap.matrix @ _unit(query)
+        scores = snap.matrix @ unit_vector(query)
         results: list[dict[str, Any]] = []
         for index in np.argsort(scores)[::-1]:
             i = int(index)
@@ -264,6 +279,7 @@ class ResidentStore:
         *,
         limit: int = 10,
         predicate: Callable[[dict[str, Any]], bool] | None = None,
+        folder: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return the rows nearest the mean of *path*'s rows, excluding *path*."""
         snap = self._current()
@@ -272,11 +288,14 @@ class ResidentStore:
         own = [i for i, row in enumerate(snap.rows) if row.get("path") == path]
         if not own:
             return []
-        scores = snap.matrix @ _unit(np.mean(snap.matrix[own], axis=0))
+        scores = snap.matrix @ unit_vector(np.mean(snap.matrix[own], axis=0))
         candidates = [
             (float(score), i)
             for i, score in enumerate(scores)
             if snap.rows[i].get("path") != path
+            and (
+                folder is None or folder_matches(snap.rows[i].get("folder", ""), folder)
+            )
             and (predicate is None or predicate(snap.rows[i]))
         ]
         candidates.sort(key=lambda candidate: candidate[0], reverse=True)

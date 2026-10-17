@@ -441,7 +441,8 @@ which thinned duplicates but did not group them.
 `search`. The frontmatter and OKF dimensions are applied post-hoc via the
 shared `_post_filter_semantic_rows` helper (the vector store carries no
 structured metadata, and each dimension needs a per-path lookup); the
-folder scope is not, and lives solely in the scan-time predicate below. The
+folder scope is not, and lives solely in the store's `folder` argument
+below. The
 post-filter matches against full frontmatter, so — unlike keyword-mode
 `search` filters — it is not limited to `indexed_frontmatter_fields`; the
 candidate pool is widened (×4, floor 200) when either is active so narrow
@@ -453,13 +454,16 @@ pool is capped at `max(limit × (chunks_per_file + 4), 1000)`, so on a
 large vault a folder whose chunks all score below that cap was discarded
 wholesale and the call returned `[]` — indistinguishable from a folder
 with no related content, and surfacing its notes needed a `limit` in the
-thousands. The store's `search` / `similar_to_document` therefore take an
-optional `predicate` over each candidate's metadata, applied while
-walking the descending-score order and before the cap, so the cap selects
-the top-k *within* the scope. This costs nothing: the similarity pass is
-a full dot product over every stored chunk regardless of `limit`. Folder
-is the dimension that rides along, because matching it is a string
-compare on metadata the vector store already holds; frontmatter and OKF
+thousands. The store's `search` / `similar_to_document` therefore take the
+folder scope (`folder`), applied before the cap, so the cap selects the
+top-k *within* the scope; a backend may push it into its query. Both also
+take an optional `predicate` over each candidate's metadata, likewise
+applied before the cap. On a resident store this costs nothing: the
+similarity pass is a full dot product over every stored chunk regardless
+of `limit`; a streamed store filters the scope in SQL, and a predicate
+costs it decoding each batch's metadata (Search memory, below). Folder is the
+dimension that rides along, because every backend holds it beside the
+vector; frontmatter and OKF
 dimensions stay post-hoc (per-path lookups are too expensive to run over
 every chunk — see #875) and keep the widening.
 
@@ -467,7 +471,7 @@ every chunk — see #875) and keep the widening.
 reason than the post-filter one: grouping keeps only `chunks_per_file`
 chunks per path, so a pool filled by one long in-scope document collapses
 the grouped result to a single file however exact the scope is. The
-predicate answers "are these rows in scope"; the widening answers "are
+scope answers "are these rows in scope"; the widening answers "are
 there enough distinct paths among them".
 
 **The `folder` argument has three states, not two** (issue #1106). `None`
@@ -4014,21 +4018,25 @@ released `VectorIndex.save` wrote opens unchanged, its rows without tokens;
 after this store's first persist a 5.1 binary finds no `{base}.npy`
 and re-embeds once.
 
-The SQLite backend (`stores/sqlite_vectors.py`, #1497) keeps the same
-resident snapshot (`stores/_resident.py`, shared with numpy) and persists it
-as rows in its own database, `{base}.sqlite3`: `meta` (format version,
-identity, generation), `documents` (path, token) and `chunks` (one float32
-BLOB per vector with its metadata as JSON, and a `folder` column for
-#1377's filter). Each `replace_document` / `remove_document` /
-`publish_generation` is one `BEGIN IMMEDIATE` transaction that checks the
-token the database holds, writes, and commits with `synchronous=FULL`
-before the snapshot is swapped, so a published write is durable when it
+The SQLite backend (`stores/sqlite_vectors.py`, #1497) keeps its rows in
+its own database, `{base}.sqlite3`: `meta` (format version, identity,
+generation), `documents` (path, token) and `chunks` (one float32 BLOB per
+vector with its metadata as JSON, and a `folder` column for #1377's
+filter). In resident mode it serves them from the same resident snapshot
+as numpy (`stores/_resident.py`); streamed mode is below. Each
+`replace_document` / `remove_document` / `publish_generation` is one
+`BEGIN IMMEDIATE` transaction that checks the token the database holds,
+writes, and commits with `synchronous=FULL` before a resident snapshot is
+swapped, so a published write is durable when it
 returns and costs the pages of that document, not the corpus (one update
 on a 3,000-document, 14 MB store adds about 29 KB of WAL); a failed one
 leaves the database's rows and the reads as they were. `checkpoint()` only
 folds the WAL, so one that fails loses nothing and is logged rather than
 raised; after a generation publish the WAL is also truncated, so it does
-not stay store-sized until close. No file exists before the first
+not stay store-sized until close. The truncate never waits for a reader:
+while a read transaction is open (a streamed scan, here or in another
+process) it is skipped and logged, and the WAL keeps its size until a
+later truncate, at the next generation or at close. No file exists before the first
 write; a first write that cannot create the database raises *unavailable*,
 logged like any failed write. A writable open takes no write lock on an
 existing store and changes nothing in a database that is not a vector
@@ -4042,6 +4050,29 @@ own file so keyword rebuilds never touch them; what WAL with `FULL`
 promises, why the WAL-reset bug does not reach this single-writer use, and
 how to back up a
 live database are in `docs/design/reference/sqlite-wal-durability.md`.
+
+**Search memory (#1377).** The SQLite store serves reads in one of two
+modes, fixed when its backend opens it. *Resident* holds every row in the
+shared snapshot: a float32 matrix of 4 × chunks × dimension bytes plus each
+chunk's metadata, including its text. *Streamed* keeps only the identity
+and generation: each read is one SQL read transaction that starts by
+reading the identity and generation the database holds, since another
+process may have published since open (another identity is refused as
+incompatible, never scored); `tokens`, `count`
+and `rows_for` are queries, and `search` / `similar_to_document` scan
+`(id, vector)` rows a batch at a time (`stores/_streamed.py`; the source
+document of `similar_to_document` is averaged a batch at a time too),
+keeping the running top *limit*, then read the winners' metadata by id in the same
+transaction, so a write committed meanwhile is not mixed in. The folder
+scope is a condition on the `folder` column; an arbitrary predicate makes
+the scan read and decode each batch's metadata before the batch is cut.
+The workspace is one batch, `max(1, workspace_bytes ÷ (4 × dimension))`
+rows (1 MiB by default: 256 rows at 1024 dimensions), plus *limit* rows:
+a bound on the scan, not on the process. Results are exact; only rows of
+equal score may order differently. A store held in memory is always
+resident: its rows are in memory anyway, and its shared-cache connections
+would let a read transaction block a writer. The numpy store is resident
+only.
 
 **The vault's slot (#1777).** `Vault` holds its vector store in a
 `VectorStoreSlot` that opens it on first use through the backend
@@ -4124,8 +4155,9 @@ lags the store is #1504's.
 Bounds: an empty mount-point directory reads as an available, empty
 source, so its vectors go as they always did (a spec gap, #1791: "an
 unmounted volume removes nothing" holds only when the mount point itself
-is missing or unreadable); the store's size in `embeddings_status` is
-#1377's; how often the full matrix is rewritten is #1497's.
+is missing or unreadable); what `embeddings_status` reports of the
+store's size and search mode is #1377's; how often the full matrix is
+rewritten is #1497's.
 
 ### `providers.py`: Embedding Providers
 
@@ -6050,3 +6082,4 @@ Later decisions (2026-10-08, #1503):
 | 30 | Resource ownership | The vault closes what it opens; the caller closes what it injects (#1765). Applies to every store backend. | A store or strategy shared with another consumer must not be closed under it; one rule for every injected collaborator, stated in `docs/decisions/0001`. |
 | 31 | Store open outcomes | Five typed outcomes under `StoreOpenError`; none reads as empty. On a store the vault owns, corrupt or another identity rebuilds into a fresh generation (a model change re-embeds, as documented); a process that does not own the files refuses with the store's own outcome and never creates or replaces them (#1766, #1777, #1778). | An unreachable or unknown store rebuilt as empty is how a server overwrites another process's index; the type says what the operator can do about it. |
 | 32 | Numpy store persistence | JSON commit point naming a per-persist matrix; in-memory publish with durability at checkpoint; `publish_generation` durable at once (#1767). | Crash-safe two-file commit without rewriting the whole matrix per document; write amplification is #1497's. |
+| 33 | Vector search memory | The SQLite store's search is resident or streamed, chosen by the operator; streamed keeps nothing per chunk resident, scans in bounded batches with an exact running top-*limit*, and pushes the folder scope into SQL (#1377). | Every vault keeps the fast path, a growing one gets a bound. Rejected: streamed only (every vault pays the scan's latency); switching by a memory budget (an estimate silently changes behaviour, and reads as a process limit); light metadata resident (grows with chunks, so the batch no longer bounds memory); memory-mapping the `.npy` (a full scan's hot set is still the whole matrix); float16 or int8 (recall loss; 015 has no recall allowance). |
