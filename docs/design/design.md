@@ -4036,9 +4036,11 @@ store before refusing it. `open_fresh` reads and checks nothing: before its
 first write it removes a file that is not a vector store or whose pages
 `PRAGMA quick_check` finds damaged (refusing a newer format instead), and
 that write empties a usable database inside its own transaction, so a
-conflict or an interrupt keeps the old rows. Vectors keep their own file so
-keyword rebuilds never touch them; what WAL with `FULL` promises, why the
-WAL-reset bug does not reach this single-writer use, and how to back up a
+conflict or an interrupt keeps the old rows. `embeddings_status` counts
+the database's rows read-only before the store opens. Vectors keep their
+own file so keyword rebuilds never touch them; what WAL with `FULL`
+promises, why the WAL-reset bug does not reach this single-writer use, and
+how to back up a
 live database are in `docs/design/reference/sqlite-wal-durability.md`.
 
 **The vault's slot (#1777).** `Vault` holds its vector store in a
@@ -4093,12 +4095,15 @@ touching the store and publishes with `replace_document` /
 `remove_document` passing the token it observed, read before the
 keyword-index rows (a revision the rows miss was published after that
 read), so a write that crosses another writer's returns `"conflict"`; the writer's runners re-queue
-conflicts with a flush and hold provider-failure paths for the next one,
+conflicts with a flush and hold the paths a provider or a store write
+failed for (a full disk, a lock timeout) for the next one,
 outside the pending work that drain status counts. At or above `_BULK_RETOKEN` (64) re-tokens in one pass, one
 `publish_generation` replaces the per-document replaces (each copies the
 whole matrix), holding every row as float32; that publish has no
 per-document token check, which the numpy store's one writer per location
-makes safe and #1504's pgvector backend must revisit. The cold build
+makes safe and #1504's pgvector backend must revisit. If it fails, every
+document in it keeps its rows and joins the retry set, as a failed
+per-document write does. The cold build
 (`rebuild`) embeds every document in batches across documents and
 publishes one generation under each document's token; a failed batch
 leaves its documents to the next convergence pass.
